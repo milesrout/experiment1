@@ -32,9 +32,17 @@ def operator(*, arity):
                     cls.store[k] = super(cls, result).__new__(cls)
                 return cls.store[k]
 
+            def free_vars(self):
+                return set.union(*[x.free_vars() for x in self.data])
+
+            def subst(self, subst):
+                return self.__class__(*[x.subst(subst) for x in self.data])
+
             d = dct.copy()
             d['__new__'] = new
             d['__init__'] = init
+            d['free_vars'] = free_vars
+            d['subst'] = subst
             d['store'] = {}
             # dirty shorthand
             d['a'] = property(lambda self: self.data[0])
@@ -45,12 +53,32 @@ def operator(*, arity):
     return operator_
 
 
-class atomic(formula, metaclass=operator(arity=1)):
+class atomic(formula):
+    def __new__(cls, a):
+        if a not in cls.store:
+            cls.store[a] = super().__new__(cls)
+        return cls.store[a]
+
+    def __init__(self, a):
+        self.a = a
+
     def __str__(self):
         return self.a
 
     def __repr__(self):
         return f'atomic({self.a!r})'
+
+    def free_vars(self):
+        return {self}
+
+    def subst(self, subst):
+        if self in subst:
+            return subst[self]
+        else:
+            return self
+
+
+atomic.store = {}
 
 
 bot = atomic('⊥')
@@ -59,8 +87,8 @@ bot = atomic('⊥')
 class impl(formula, metaclass=operator(arity=2)):
     def __str__(self):
         # This is temporarily disabled
-        # if self.b is bot:
-        #     return f'¬{self.a}'
+        if self.b is bot:
+            return f'¬{self.a}'
         return f'({self.a} → {self.b})'
 
     def __repr__(self):
