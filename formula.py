@@ -22,6 +22,7 @@ def operator(*, arity):
             def init(self, *args):
                 if len(args) != arity:
                     raise_arity(arity, len(args))
+                assert all(isinstance(x, formula) for x in args)
                 self.data = args
 
             def new(cls, *args):
@@ -32,17 +33,25 @@ def operator(*, arity):
                     cls.store[k] = super(cls, result).__new__(cls)
                 return cls.store[k]
 
+            def subformulae(self):
+                return set.union({self}, *[x.subformulae() for x in self.data])
+
             def free_vars(self):
                 return set.union(*[x.free_vars() for x in self.data])
 
             def subst(self, subst):
                 return self.__class__(*[x.subst(subst) for x in self.data])
 
+            def depth(self):
+                return 1 + max(x.depth for x in self.data)
+
             d = dct.copy()
             d['__new__'] = new
             d['__init__'] = init
             d['free_vars'] = free_vars
+            d['subformulae'] = subformulae
             d['subst'] = subst
+            d['depth'] = property(depth)
             d['store'] = {}
             # dirty shorthand
             d['a'] = property(lambda self: self.data[0])
@@ -61,12 +70,16 @@ class atomic(formula):
 
     def __init__(self, a):
         self.a = a
+        self.depth = 1
 
     def __str__(self):
         return self.a
 
     def __repr__(self):
         return f'atomic({self.a!r})'
+
+    def subformulae(self):
+        return {self}
 
     def free_vars(self):
         return {self}

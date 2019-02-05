@@ -11,7 +11,7 @@ from formula import atomic, impl
 POPSIZE = 20
 PROB_MUTATION = 0.2
 PROB_CROSSOVER = 0.5
-ADD_OR_REMOVE_FACTOR = 1 - 1/math.sqrt(2)
+ADD_OR_REMOVE_FACTOR = 0.99
 depths = collections.Counter()
 
 
@@ -34,6 +34,9 @@ class Premise:
         self.conclusion = formula
         self.dependencies = set()
 
+    def subst_dep(self, old):
+        return self
+
     def __repr__(self):
         return f'P:{self.formula}'
 
@@ -51,6 +54,13 @@ class Substitution:
         else:
             return f'SUB:{self.conclusion}'
 
+    def subst_dep(self, old):
+        original = old.get(self.original.conclusion,
+                           self.original.subst_dep(old))
+        if original is self.original:
+            return self
+        return Substitution(original, self.subst)
+
 
 class ModusPonens:
     def __init__(self, atob, a):
@@ -65,6 +75,13 @@ class ModusPonens:
     def dependencies(self):
         return {self.atob, self.a}
 
+    def subst_dep(self, old):
+        atob = old.get(self.atob.conclusion, self.atob.subst_dep(old))
+        a = old.get(self.a.conclusion, self.a.subst_dep(old))
+        if atob is self.atob and a is self.a:
+            return self
+        return ModusPonens(atob, a)
+
     def __repr__(self):
         if isinstance(self.atob, Premise) and isinstance(self.a, Premise):
             return f'{self.atob}|{self.a}|MP:{self.conclusion}'
@@ -76,7 +93,7 @@ class ModusPonens:
             return f'MP:{self.conclusion}'
 
 
-class Proof1:
+class Proof:
     def __init__(self, goal, premises, steps):
         self.goal = goal
         self.premises = premises
@@ -87,10 +104,16 @@ class Proof1:
 
     def __repr__(self):
         return str(self)
-        return f'Proof1({self.goal}, {self.premises}, {self.steps})'
+        return f'Proof({self.goal}, {self.premises}, {self.steps})'
 
     @staticmethod
     def crossover(left, right):
+        # select an unused step from each
+        stepL = left.get_unused_step()
+        stepR = right.get_unused_step()
+        if stepL is not None and stepR is not None:
+            right = right.add_new_step(stepL).remove_step(stepR)
+            left = left.add_new_step(stepR).remove_step(stepL)
         return (left, right)
 
     def mutate(self):
@@ -101,7 +124,7 @@ class Proof1:
 
         if random.random() < ADD_OR_REMOVE_FACTOR:
             return self.add_random_step()
-        elif random.random() < ADD_OR_REMOVE_FACTOR:
+        elif random.random() > ADD_OR_REMOVE_FACTOR:
             return self.remove_unused_step()
         else:
             return self.remove_unused_step().add_random_step()
@@ -111,32 +134,58 @@ class Proof1:
         step = self.random_step()
         if step is not None:
             steps.append(step)
-        return Proof1(self.goal, self.premises, steps).remove_duplicates()
+        return Proof(self.goal, self.premises, steps).remove_duplicates()
 
-    def remove_unused_step(self):
+    def add_new_step(self, new_step):
+        new = new_step.subst_dep({s.conclusion: s for s in self.steps})
+        steps = set(self.steps)
+        new_steps = set()
+        for dep in new.dependencies:
+            if dep not in steps and not isinstance(dep, Premise):
+                new_steps.add(dep)
+        return Proof(self.goal, self.premises,
+                     self.steps + list(new_steps) + [new])
+
+    def remove_step(self, step):
+        return Proof(self.goal, self.premises,
+                     [s for s in self.steps if s != step])
+
+    def get_unused_step(self):
+        steps = self.get_unused_steps()
+        if len(steps) == 0:
+            return None
+        return self.steps[random.choice(list(steps))]
+
+    def get_unused_steps(self):
         used_steps = set()
         for step in self.steps:
             used_steps |= step.dependencies
-            # it's not a useless step if it results in the goal!
-            if step.conclusion == self.goal:
-                used_steps.add(step)
-        # the final step is never useless
-        used_steps.add(self.steps[-1])
         unused_steps = dict((x, i) for (i, x) in enumerate(self.steps))
         for x in used_steps:
             if x in unused_steps:
                 del unused_steps[x]
-        if len(unused_steps.values()) == 0:
+        return unused_steps.values()
+
+    def remove_unused_step(self):
+        # it's not a useless step if it results in the goal!
+        # also, the final step is never useless.
+        unused_steps = {x for x in self.get_unused_steps()
+                        if self.steps[x].conclusion != self.goal
+                        and x != len(self.steps) - 1}
+        if len(unused_steps) == 0:
             return self
-        idx = random.choice(list(unused_steps.values()))
+        idx = random.choice(list(unused_steps))
 
         steps = list(self.steps)
         steps.pop(idx)
-        return Proof1(self.goal, self.premises, steps)
+        return Proof(self.goal, self.premises, steps)
 
     def random_step(self):
-        return random.choice([self.random_modusponens,
-                              self.random_substitution])()
+        step = self.random_modusponens()
+        if step is not None:
+            return step
+        return self.random_substitution()
+        # return random.choice([self.random_substitution])()
 
     def all_vars(self):
         xs = [step.conclusion.free_vars() for step in self.steps]
@@ -144,14 +193,20 @@ class Proof1:
         zs = self.goal.free_vars()
         return [x.a for x in set.union(*xs, *ys, zs)]
 
+    def all_subformulae(self):
+        ss = [step.conclusion.subformulae() for step in self.steps]
+        gs = self.goal.subformulae()
+        return list(set.union(*ss, gs))
+
     def random_substitution(self):
         step = random.choice(self.premises)
+        all_subformulae = self.all_subformulae()
         subst = {}
         for x in step.conclusion.free_vars():
             depth = math.floor(random.expovariate(1.5))
             depths[depth] += 1
             subst[x] = rand.rand_eq_depth(
-                depth, variables=self.all_vars(), connectives=[impl])
+                depth, base_formulae=all_subformulae, connectives=[impl])
         return Substitution(step, subst)
 
     def random_modusponens(self):
@@ -173,13 +228,10 @@ class Proof1:
                 yield step
 
     def remove_duplicates(self):
-        return Proof1(self.goal, self.premises,
-                      list(self._remove_duplicates()))
+        return Proof(self.goal, self.premises,
+                     list(self._remove_duplicates()))
 
     def apply(self, goal, premises):
-        for premise in self.premises:
-            if premise.conclusion == goal:
-                return True
         for step in self.steps:
             if step.conclusion == goal:
                 return True
@@ -188,10 +240,19 @@ class Proof1:
     @staticmethod
     def fitness(goal, premises):
         def evaluate(proof):
-            if proof.apply(goal, premises):
-                return 1000
-            else:
-                return 0.1
+            subgoals = [
+                (~pA > (pA > ~pA)),
+                # (~pA > pA) > (~pA > ~~pA),
+                (~pA > (pA > ~pA)) > (~(pA > ~pA) > ~~pA)
+            ]
+            total = 1.1 - 1 / (1 + len(proof.steps))
+            seen = set()
+            for step in proof.steps:
+                if step.conclusion in subgoals and step.conclusion not in seen:
+                    seen.add(step.conclusion)
+                    total += 1
+                    total *= 10
+            return total
         return evaluate
 
 
@@ -202,15 +263,17 @@ pC = atomic('C')
 
 def main():
     # goal = ~pA > (pA > ~pA)
-    goal = (~pA > (pA > ~pA)) > (~(pA > ~pA) > ~~pA)
+    # goal = (~pA > pA) > (~pA > ~~pA)
+    # goal = (~pA > (pA > ~pA)) > (~(pA > ~pA) > ~~pA)
     # goal = (~~pA > pA) > (~(pA > ~pA) > pA)
-    # goal = (~~pA > pA) > (~(pA > ~pA) > pA)
+    goal = ~(pA > ~pA) > ~~pA
     premises = [
         Premise(pA > (pB > pA)),
+        Premise((pA > (pB > pC)) > ((pA > pB) > (pA > pC))),
         Premise((pA > pB) > ((pB > pC) > (pA > pC))),
     ]
     lastgen = None
-    newgen = [Proof1(goal, premises, []) for i in range(POPSIZE)]
+    newgen = [Proof(goal, premises, []) for i in range(POPSIZE)]
     print(f'{", ".join(map(str, premises))} |- {goal}')
     for generation in itertools.count():
         lastgen, newgen = newgen, []
@@ -218,7 +281,7 @@ def main():
         for i, indiv in enumerate(lastgen):
             if random.random() < PROB_CROSSOVER:
                 idx = random.randrange(len(lastgen))
-                new1, new2 = Proof1.crossover(indiv, lastgen[idx])
+                new1, new2 = Proof.crossover(indiv, lastgen[idx])
                 newgen.append(new1)
                 newgen.append(new2)
             else:
@@ -236,23 +299,24 @@ def main():
                 print('\n\nPROOF FOUND')
                 print(x)
                 print('\n\nWITH USELESS STEPS REMOVED')
-                y = x
-                while x is y:
+                y = None
+                while x is not y:
                     y = x.remove_unused_step()
                     x, y = y, x
                 print(x)
                 return
 
         # STRICT ELITISM
-        # newgen.sort(key=Proof1.fitness(goal, premises), reverse=True)
+        # newgen.sort(key=Proof.fitness(goal, premises), reverse=True)
         # newgen = newgen[:POPSIZE]
 
         # WEIGHTED ELITISM
-        weights = map(Proof1.fitness(goal, premises), newgen)
+        weights = map(Proof.fitness(goal, premises), newgen)
         newgen = random.choices(newgen, weights, k=POPSIZE)
 
         # print('After pruning:')
-        if generation % 3000 == 0:
+        #if generation % 3000 == 0:
+        if 1:
             print(f'Generation {generation}:')
             print(newgen)
 
