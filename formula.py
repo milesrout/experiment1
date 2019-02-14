@@ -40,7 +40,7 @@ def operator(*, arity):
                 return set.union(*[x.free_vars() for x in self.data])
 
             def subst(self, subst):
-                return self.__class__(*[x.subst(subst) for x in self.data])
+                return cls(*[x.subst(subst) for x in self.data])
 
             def depth(self):
                 return 1 + max(x.depth for x in self.data)

@@ -4,6 +4,7 @@ import itertools
 import math
 import rand
 import random
+import unicodedata
 
 from formula import atomic, impl
 
@@ -257,8 +258,10 @@ class Proof:
 
 
 pA = atomic('A')
-pB = atomic('B')
-pC = atomic('C')
+
+pa = atomic(unicodedata.lookup('GREEK SMALL LETTER PHI'))
+pb = atomic(unicodedata.lookup('GREEK SMALL LETTER THETA'))
+pc = atomic(unicodedata.lookup('GREEK SMALL LETTER PSI'))
 
 
 def main():
@@ -268,9 +271,9 @@ def main():
     # goal = (~~pA > pA) > (~(pA > ~pA) > pA)
     goal = ~(pA > ~pA) > ~~pA
     premises = [
-        Premise(pA > (pB > pA)),
-        Premise((pA > (pB > pC)) > ((pA > pB) > (pA > pC))),
-        Premise((pA > pB) > ((pB > pC) > (pA > pC))),
+        Premise(pa > (pb > pa)),
+        Premise((pa > (pb > pc)) > ((pa > pb) > (pa > pc))),
+        Premise((pa > pb) > ((pb > pc) > (pa > pc))),
     ]
     lastgen = None
     newgen = [Proof(goal, premises, []) for i in range(POPSIZE)]
