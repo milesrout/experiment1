@@ -1,15 +1,21 @@
+import _thread
 import collections
+import contextlib
 import functools
 import itertools
 import random
+import signal
+import sys
+import threading
 import unicodedata
 
-import sat
-import rand
 from formula import atomic, bot, impl, conj, disj
+import rand
+import sat
 
 
-MAXDEPTH = 4
+ALPHA = 20
+MAXDEPTH = 5
 POPSIZE = 20
 PROB_MUTATION = 0.2
 PROB_CROSSOVER = 0.5
@@ -89,6 +95,38 @@ def disj_right_2():
     return _disj_right_2
 
 
+def nearby(x, a=0, b=1, alpha=20):
+    """Returns a value near x within the range [a,b]
+
+    alpha - higher means nearer x
+    """
+    v = (x - a) / (b - a)
+    return a + (b - a) * random.betavariate(alpha, alpha * ((1 / v) - 1))
+
+
+class TimeLimit(BaseException):
+    @staticmethod
+    def throw():
+        raise TimeLimit
+
+
+@contextlib.contextmanager
+def timelimit(limit=1):
+    t = threading.Timer(limit / 1000, _thread.interrupt_main)
+    h = signal.signal(signal.SIGINT, lambda sig, frame: TimeLimit.throw())
+    t.start()
+    yield
+    t.cancel()
+    signal.signal(signal.SIGINT, h)
+
+
+# try:
+#     with timelimit():
+#         __import__('time').sleep(1)
+# except KeyboardInterrupt as exc:
+#     raise TimeLimit from exc
+
+
 class WeightedHeuristic:
     NUMWEIGHTS = 1
 
@@ -112,13 +150,14 @@ class WeightedHeuristic:
         return [WeightedHeuristic(w_)]
 
     def mutate(self):
-        return self
+        w = [nearby(x, alpha=ALPHA) for x in self.weights]
+        return WeightedHeuristic(w)
 
     def apply(self, stmt):
         (premises, goal) = stmt
         opts = [option for options in map(self.options_left, premises)
                 for option in options]
-        return opts + self.options_right(goal)
+        return self.options_right(goal) + opts
 
     def options_right(self, formula):
         if isinstance(formula, impl):
@@ -140,6 +179,7 @@ class WeightedHeuristic:
 
 
 backtrack_stack = [{}]
+seen_ever = {}
 
 
 def seen():
@@ -153,13 +193,6 @@ class Backtrack(BaseException):
 def freeze(stmt):
     premises, goal = stmt
     return frozenset(premises), goal
-
-
-def prove(statement, heuristic):
-    try:
-        return do_prove(statement, heuristic)
-    except Backtrack:
-        return None
 
 
 @compose('\n'.join)
@@ -305,67 +338,128 @@ class ByImplRight(Proof):
         return self.fmtunary(IMPL + 'R', self.g2aib, self.ga2b)
 
 
-def do_prove(statement, heuristic):
-    premises, goal = statement
-    # We can restrict the A |- A rule to only atomic formulas. Every proof that
-    # can be done with that restriction can be done without it, but they're
-    # longer and in trivial ways, so we don't do so.
-    # if goal in premises and isinstance(goal, atomic):
-    if goal in premises:
-        return ByAxiom(premises, goal)
-    if freeze(statement) in seen():
-        # print('seen', statement)
-        if seen()[freeze(statement)] is None:
+class Prover:
+    def __init__(self, heuristic):
+        self.heuristic = heuristic
+        self.inprogress = collections.ChainMap({})
+        self.proved = {}
+        self.failed = set()
+
+    def bookmark(self):
+        self.inprogress = self.inprogress.new_child()
+
+    def isproved(self, sequent):
+        return sequent in self.proved
+
+    def isinprogress(self, sequent):
+        p0, g0 = sequent
+        for p, g in self.inprogress:
+            if g == g0 and p0 <= p:
+                return True
+        return False
+
+    def hasfailed(self, sequent):
+        return sequent in self.failed
+
+    def getproof(self, sequent):
+        return self.proved[sequent]
+
+    def markinprogress(self, sequent):
+        # using only the 'set' part of the ChainMap, the values don't matter
+        self.inprogress[sequent] = None
+
+    def markproved(self, sequent, proof):
+        self.proved[sequent] = proof
+
+    def markfailed(self, sequent):
+        self.failed.add(sequent)
+
+    def backtrack(self):
+        self.inprogress = self.inprogress.parents
+
+    def do_prove(self, statement):
+        premises, goal = statement
+        # We can restrict the A |- A rule to only atomic formulas. Every proof
+        # that can be done with that restriction can be done without it, but
+        # they're longer just include a few more (trivial) steps, so we don't
+        # do so.
+        #    if goal in premises and isinstance(goal, atomic):
+        #        return ByAxiom(premises, goal)
+        # This gives us intuitionistic logic:
+        #    if bot in premises:
+        #        return ByAxiom(premises, goal)
+        if goal in premises:
+            # print('TRIVIAL   ', Proof.fmtstmt(statement))
+            return ByAxiom(premises, goal)
+        if self.isproved(statement):
+            # print('PROVED    ', Proof.fmtstmt(statement))
+            return self.getproof(statement)
+        if self.hasfailed(statement):
+            # print('FAILED    ', Proof.fmtstmt(statement))
             raise Backtrack
-        return seen()[freeze(statement)]
-    options = heuristic.apply(statement)
-    for option in options:
-        results = []
+        if self.isinprogress(statement):
+            # print('INPROGRESS', Proof.fmtstmt(statement))
+            raise Backtrack
+        # print('TRYING    ', Proof.fmtstmt(statement))
+        # if freeze(statement) not in seen_ever:
+        #     print('seen', Proof.fmtstmt(statement))
+        # if freeze(statement) in seen():
+        #     if seen()[freeze(statement)] is None:
+        #         raise Backtrack
+        #     return seen()[freeze(statement)]
         try:
-            seen()[freeze(statement)] = None
-            name, stmts = option(*statement)
-            for stmt in stmts:
-                results.append(do_prove(stmt, heuristic))
+            self.markinprogress(statement)
+            options = self.heuristic.apply(statement)
+            for option in options:
+                results = []
+                try:
+                    name, stmts = option(*statement)
+                    for stmt in stmts:
+                        results.append(self.do_prove(stmt))
+                except Backtrack:
+                    continue
+                proof = name(statement, *results)
+                self.markproved(statement, proof)
+                return proof
+            self.markfailed(statement)
+            raise Backtrack
         except Backtrack:
-            del seen()[freeze(statement)]
-            continue
-        seen()[freeze(statement)] = name(statement, *results)
-        return seen()[freeze(statement)]
-    raise Backtrack
+            self.backtrack()
+            raise
+        raise RuntimeError('Should never get here under normal circumstances')
 
-
-def _prove(statement, heuristic):
-    if freeze(statement) in seen():
-        raise Backtrack
-    seen()[freeze(statement)] = None
-    for stmts in heuristic.apply(statement):
-        print(' ' * len(backtrack_stack), end='')
-        backtrack_stack.append(dict(seen()))
-        res = stmts(*statement)
-        for stmt in res:
-            try:
-                prove(stmt, heuristic)
-            except Backtrack:
-                print('BACKTRACK')
-                backtrack_stack.pop()
-                continue
-    raise Backtrack
+    def prove(self, statement):
+        try:
+            return self.do_prove(freeze(statement))
+        except Backtrack:
+            return None
 
 
 def evaluate(implications):
     def _evaluate(heur):
         successes = 0
+        timeouts = 0
         total = 0
-        for statement in random_statements():
-            proof = prove(statement, heur)
-            print(proof)
+        for statement in implications:
+            try:
+                with timelimit(500):
+                    prover = Prover(heur)
+                    proof = prover.prove(statement)
+            except TimeLimit:
+                print('TIMED OUT')
+                timeouts += 1
+                proof = None
             if proof is not None:
+                print(proof)
                 successes += 1
             else:
                 print('not minimally provable:')
                 print(Proof.fmtstmt(statement))
             total += 1
-            print(successes, total, successes / total)
+            print(f'{successes}/{total}: {int(100 * (successes / total))}%')
+            print(f'{timeouts}/{total}: {int(100 * (timeouts / total))}%')
+            # print(successes, total, int(100 * (successes / total)))
+            # print(timeouts, total, int(100 * (timeouts / total)))
         print('DONE')
         raise
         return total / len(implications)
@@ -434,7 +528,9 @@ implications = [
 def random_statements():
     stmts = set()
     while len(stmts) < 1000:
-        formula = rand.rand_lt_depth(MAXDEPTH, [pA, pB, pC, ~pA, ~pB, ~pC], (impl,))
+        formula = rand.rand_lt_depth(MAXDEPTH,
+                                     [pA, pB, pC, ~pA, ~pB, ~pC],
+                                     (impl,))
         if sat.tautological(formula):
             print(len(stmts), formula)
             stmts.add((frozenset(), formula))
@@ -482,4 +578,5 @@ def main():
 
 
 if __name__ == '__main__':
+    sys.setrecursionlimit(1000000)
     main()
