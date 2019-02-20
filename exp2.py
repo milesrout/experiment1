@@ -5,6 +5,7 @@ import functools
 import itertools
 import random
 import signal
+import statistics
 import sys
 import threading
 import unicodedata
@@ -12,22 +13,31 @@ import unicodedata
 from formula import atomic, bot, impl, conj, disj
 import rand
 import sat
+import stats
 
+ABBREV = True
+
+ND = int(sys.argv[3])
+RA = int(sys.argv[4])
+NC = int(sys.argv[2])
+MD = int(sys.argv[1])
+NUMSTMTS = 10000 if len(sys.argv) < 6 else int(sys.argv[5])
 
 ALPHA = 20
-MAXDEPTH = 5
+MAXDEPTH = MD  # 5
 POPSIZE = 20
 PROB_MUTATION = 0.2
 PROB_CROSSOVER = 0.5
 ADD_OR_REMOVE_FACTOR = 0.99
+CONNECTIVES = (impl, conj, disj) if NC == 3 else (impl,)  # (impl,)
 depths = collections.Counter()
 
 PHI = unicodedata.lookup('GREEK SMALL LETTER PHI')
 THETA = unicodedata.lookup('GREEK SMALL LETTER THETA')
 PSI = unicodedata.lookup('GREEK SMALL LETTER PSI')
 IMPL = unicodedata.lookup('RIGHTWARDS ARROW')
-CONJ = '^'
-DISJ = 'v'
+CONJ = '∧'
+DISJ = '∨'
 TSTILE = unicodedata.lookup('RIGHT TACK')
 
 
@@ -153,11 +163,20 @@ class WeightedHeuristic:
         w = [nearby(x, alpha=ALPHA) for x in self.weights]
         return WeightedHeuristic(w)
 
+    @staticmethod
+    def key(opt):
+        if opt.__name__ in ['_conj_right', '_disj_left', '_impl_left']:
+            return 1
+        else:
+            return 2
+
     def apply(self, stmt):
         (premises, goal) = stmt
         opts = [option for options in map(self.options_left, premises)
                 for option in options]
-        return self.options_right(goal) + opts
+        opts2 = self.options_right(goal) + opts
+        opts2.sort(reverse=False, key=self.key)
+        return opts2
 
     def options_right(self, formula):
         if isinstance(formula, impl):
@@ -262,6 +281,10 @@ class ByAxiom(Proof):
         return (f'{p2g1:^{mwidth}}   \n{divider}  W\n' +
                 f'{p2g2 + "   ":^{mwidth}}\n{divider2 + " Ax":^{mwidth}}')
 
+    @property
+    def size(self):
+        return 1
+
 
 class ByConjLeft1(Proof):
     def __init__(self, ganb2c, ga2c):
@@ -271,6 +294,10 @@ class ByConjLeft1(Proof):
     def __str__(self):
         return self.fmtunary(CONJ + 'L', self.ganb2c, self.ga2c)
 
+    @property
+    def size(self):
+        return 1 + self.ga2c.size
+
 
 class ByConjLeft2(Proof):
     def __init__(self, ganb2c, gb2c):
@@ -279,6 +306,10 @@ class ByConjLeft2(Proof):
 
     def __str__(self):
         return self.fmtunary(CONJ + 'L', self.ganb2c, self.gb2c)
+
+    @property
+    def size(self):
+        return 1 + self.gb2c.size
 
 
 class ByConjRight(Proof):
@@ -290,6 +321,10 @@ class ByConjRight(Proof):
     def __str__(self):
         return self.fmtbinary(CONJ + 'R', self.g2anb, self.g2a, self.g2b)
 
+    @property
+    def size(self):
+        return 1 + self.g2a.size + self.g2b.size
+
 
 class ByDisjRight1(Proof):
     def __init__(self, g2aob, g2a):
@@ -299,6 +334,10 @@ class ByDisjRight1(Proof):
     def __str__(self):
         return self.fmtunary(DISJ + 'R', self.g2aob, self.g2a)
 
+    @property
+    def size(self):
+        return 1 + self.g2a.size
+
 
 class ByDisjRight2(Proof):
     def __init__(self, g2aob, g2b):
@@ -307,6 +346,10 @@ class ByDisjRight2(Proof):
 
     def __str__(self):
         return self.fmtunary(DISJ + 'R', self.g2aob, self.g2b)
+
+    @property
+    def size(self):
+        return 1 + self.g2b.size
 
 
 class ByDisjLeft(Proof):
@@ -318,6 +361,10 @@ class ByDisjLeft(Proof):
     def __str__(self):
         return self.fmtbinary(DISJ + 'L', self.gaob2c, self.ga2c, self.gb2c)
 
+    @property
+    def size(self):
+        return 1 + self.ga2c.size + self.gb2c.size
+
 
 class ByImplLeft(Proof):
     def __init__(self, gaib2c, g2a, gb2c):
@@ -328,6 +375,10 @@ class ByImplLeft(Proof):
     def __str__(self):
         return self.fmtbinary(IMPL + 'L', self.gaib2c, self.g2a, self.gb2c)
 
+    @property
+    def size(self):
+        return 1 + self.g2a.size + self.gb2c.size
+
 
 class ByImplRight(Proof):
     def __init__(self, g2aib, ga2b):
@@ -336,6 +387,10 @@ class ByImplRight(Proof):
 
     def __str__(self):
         return self.fmtunary(IMPL + 'R', self.g2aib, self.ga2b)
+
+    @property
+    def size(self):
+        return 1 + self.ga2b.size
 
 
 class Prover:
@@ -388,9 +443,15 @@ class Prover:
         # This gives us intuitionistic logic:
         #    if bot in premises:
         #        return ByAxiom(premises, goal)
-        if goal in premises:
-            # print('TRIVIAL   ', Proof.fmtstmt(statement))
-            return ByAxiom(premises, goal)
+        if RA == 1:
+            if goal in premises and isinstance(goal, atomic):
+                # print('TRIVIAL   ', Proof.fmtstmt(statement))
+                return ByAxiom(premises, goal)
+        else:
+            if goal in premises:
+                # print('TRIVIAL   ', Proof.fmtstmt(statement))
+                return ByAxiom(premises, goal)
+
         if self.isproved(statement):
             # print('PROVED    ', Proof.fmtstmt(statement))
             return self.getproof(statement)
@@ -440,27 +501,51 @@ def evaluate(implications):
         successes = 0
         timeouts = 0
         total = 0
-        for statement in implications:
+        sizes = []
+        for statement in random_statements():  # implications:
             try:
                 with timelimit(500):
                     prover = Prover(heur)
                     proof = prover.prove(statement)
             except TimeLimit:
-                print('TIMED OUT')
+                # print('TIMED OUT')
                 timeouts += 1
                 proof = None
             if proof is not None:
-                print(proof)
+                # print(proof)
                 successes += 1
+                sizes.append(proof.size)
+                if proof.size > 10000:
+                    print(proof.size, Proof.fmtstmt(statement))
             else:
-                print('not minimally provable:')
-                print(Proof.fmtstmt(statement))
+                pass
+                # print('not minimally provable:')
+                # print(Proof.fmtstmt(statement))
             total += 1
-            print(f'{successes}/{total}: {int(100 * (successes / total))}%')
-            print(f'{timeouts}/{total}: {int(100 * (timeouts / total))}%')
+            # print(f'{successes}/{total}: {int(100 * (successes / total))}%')
+            # print(f'{timeouts}/{total}: {int(100 * (timeouts / total))}%')
+            # if len(sizes) % 1000 == 0 and len(sizes) != 0:
+            #     print(f'average size: {sum(sizes) / len(sizes):.1f}')
             # print(successes, total, int(100 * (successes / total)))
             # print(timeouts, total, int(100 * (timeouts / total)))
-        print('DONE')
+        # print('DONE')
+        mean = statistics.mean(sizes)
+        median = statistics.median_low(sizes)
+        mode = statistics.mode(sizes)
+        skewness = stats.skewness(sizes, mean)
+        variance = statistics.variance(sizes, mean)
+        excess_kurtosis = stats.excess_kurtosis(sizes, mean)
+
+        if ABBREV:
+            print(f'{mean:.2f}, {median}, {mode},', end=' ')
+            print(f'{skewness:.2f}, {variance:.2f}, {excess_kurtosis:.2f}')
+            exit()
+        print(f'mean: {mean}')
+        print(f'median: {median}')
+        print(f'mode: {mode}')
+        print(f'skewness: {skewness}')
+        print(f'variance: {variance}')
+        print(f'excess kurtosis: {excess_kurtosis}')
         raise
         return total / len(implications)
     return _evaluate
@@ -526,14 +611,17 @@ implications = [
 
 
 def random_statements():
-    stmts = set()
-    while len(stmts) < 1000:
+    # return [(frozenset({(pA > pA) > pB}), (pA > pA) > pB)]
+    stmts = []
+    while len(stmts) < NUMSTMTS:
         formula = rand.rand_lt_depth(MAXDEPTH,
                                      [pA, pB, pC, ~pA, ~pB, ~pC],
-                                     (impl,))
+                                     CONNECTIVES)
         if sat.tautological(formula):
-            print(len(stmts), formula)
-            stmts.add((frozenset(), formula))
+            # if len(stmts) % 1000 == 0:
+                # print(len(stmts), formula)
+            stmts.append((frozenset(), formula))
+    print(f'generated {NUMSTMTS} statements')
     return list(stmts)
 
 
@@ -564,7 +652,7 @@ def main():
         # newgen = newgen[:POPSIZE]
 
         # WEIGHTED ELITISM
-        print(newgen)
+        # print(newgen)
         weights = map(evaluate(implications), newgen)
         newgen = random.choices(newgen, weights, k=POPSIZE)
 

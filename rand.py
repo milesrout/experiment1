@@ -1,4 +1,5 @@
 import random
+from exp2 import ND
 
 
 def iterate(f, n, variables=2, connectives=3):
@@ -32,7 +33,10 @@ def rand_lt_depth(depth, base_formulae, connectives):
 
     c, v = len(connectives), len(base_formulae)
     d = random_depth(depth, samples=1, num_variables=v, num_connectives=c)[-1]
-    return rand_eq_depth_nodups(d, base_formulae, connectives)
+    if ND == 1:
+        return rand_eq_depth_nodups(d, base_formulae, connectives)
+    else:
+        return rand_eq_depth(d, base_formulae, connectives)
 
 
 def rand_eq_depth(depth, base_formulae, connectives):
