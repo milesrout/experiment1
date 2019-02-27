@@ -11,6 +11,25 @@ class formula:
     def __invert__(self):
         return impl(self, bot)
 
+    def subformulae(self):
+        return set.union({self}, *[x.subformulae() for x in self.data])
+
+    def free_vars(self):
+        return set.union(*[x.free_vars() for x in self.data])
+
+    def subst(self, subst):
+        return self.__class__(*[x.subst(subst) for x in self.data])
+
+    @property
+    def depth(self):
+        return 1 + max(x.depth for x in self.data)
+
+    def __str__(self):
+        """This cuts down one test from 20s to 3s"""
+        if self.string_rep is None:
+            self.string_rep = self.str()
+        return self.string_rep
+
 
 def raise_arity(expected, actual):
     raise TypeError(f'too many arguments: expected {expected}, got {actual}')
@@ -24,6 +43,7 @@ def operator(*, arity):
                     raise_arity(arity, len(args))
                 assert all(isinstance(x, formula) for x in args)
                 self.data = args
+                self.string_rep = None
 
             def new(cls, *args):
                 if len(args) != arity:
@@ -33,25 +53,13 @@ def operator(*, arity):
                     cls.store[k] = super(cls, result).__new__(cls)
                 return cls.store[k]
 
-            def subformulae(self):
-                return set.union({self}, *[x.subformulae() for x in self.data])
-
-            def free_vars(self):
-                return set.union(*[x.free_vars() for x in self.data])
-
-            def subst(self, subst):
-                return cls(*[x.subst(subst) for x in self.data])
-
-            def depth(self):
-                return 1 + max(x.depth for x in self.data)
+            def getnewargs(self):
+                return tuple(self.data)
 
             d = dct.copy()
             d['__new__'] = new
             d['__init__'] = init
-            d['free_vars'] = free_vars
-            d['subformulae'] = subformulae
-            d['subst'] = subst
-            d['depth'] = property(depth)
+            d['__getnewargs__'] = getnewargs
             d['store'] = {}
             # dirty shorthand
             d['a'] = property(lambda self: self.data[0])
@@ -68,9 +76,15 @@ class atomic(formula):
             cls.store[a] = super().__new__(cls)
         return cls.store[a]
 
+    def __getnewargs__(self):
+        return (self.a,)
+
     def __init__(self, a):
         self.a = a
-        self.depth = 1
+
+    @property
+    def depth(self):
+        return 1
 
     def __str__(self):
         return self.a
@@ -98,7 +112,7 @@ bot = atomic('⊥')
 
 
 class impl(formula, metaclass=operator(arity=2)):
-    def __str__(self):
+    def str(self):
         # This is temporarily disabled
         if self.b is bot:
             return f'¬{self.a}'
@@ -109,7 +123,7 @@ class impl(formula, metaclass=operator(arity=2)):
 
 
 class disj(formula, metaclass=operator(arity=2)):
-    def __str__(self):
+    def str(self):
         return f'({self.a} ∨ {self.b})'
 
     def __repr__(self):
@@ -117,7 +131,7 @@ class disj(formula, metaclass=operator(arity=2)):
 
 
 class conj(formula, metaclass=operator(arity=2)):
-    def __str__(self):
+    def str(self):
         return f'({self.a} ∧ {self.b})'
 
     def __repr__(self):

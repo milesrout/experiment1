@@ -1,0 +1,48 @@
+exp1.py: 'evolve' proofs in a Hilbert-style proof system for minimal propositional logic
+exp2.py: prove things in minimal propositional sequent calculus (and calculate various statistics about the size of those proofs)
+
+Run:
+
+    # To make exp2.py executable
+    chmod +x ./exp2.py
+
+    # To see how the command line interface works
+    ./exp2.py --help
+    ./exp2.py generate --help
+    ./exp2.py stats --help
+
+    # To generate some formulae
+    ./exp2.py generate --output formulae.bin --max-depth 3
+
+    # To attempt to prove some formulae and give stats about the size of those proofs
+    ./exp2.py stats --input formulae.bin
+
+Example:
+
+    $ ./exp2.py generate --output formulae.bin --max-depth 5 --connectives 1
+    generated 10000 statements
+
+    $ ./exp2.py stats --input formulae.bin
+    Successes: 4763/10000: 47%
+    Timeouts: 0/10000: 0%
+    mean: 366.69871929456224
+    median: 39
+    most_common: [(5, 481), (10, 183), (8, 110)]
+    shortest: 4
+    longest: 206909
+    skewness: 41.36614115870174
+    variance: 13868574.485649347
+    excess kurtosis: 2102.4202907142203
+
+    $ ./exp2.py stats --input formulae.bin --reverse
+    Successes: 4807/10000: 48%
+    Timeouts: 0/10000: 0%
+    mean: 21.712502600374453
+    median: 15
+    most_common: [(5, 1018), (10, 367), (13, 219)]
+    shortest: 4
+    longest: 1548
+    skewness: 22.641249523151746
+    variance: 1168.119575237977
+    excess kurtosis: 881.3525206013211
+

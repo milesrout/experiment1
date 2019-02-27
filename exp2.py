@@ -1,36 +1,22 @@
-import _thread
+#!/usr/bin/env python3
+
+import argparse
 import collections
-import contextlib
-import functools
 import itertools
+import pickle
 import random
-import signal
 import statistics
 import sys
-import threading
 import unicodedata
 
 from formula import atomic, bot, impl, conj, disj
 import rand
 import sat
 import stats
+from utils import TimeLimit, timelimit, memoise, compose
 
-ABBREV = True
-
-ND = int(sys.argv[3])
-RA = int(sys.argv[4])
-NC = int(sys.argv[2])
-MD = int(sys.argv[1])
-NUMSTMTS = 10000 if len(sys.argv) < 6 else int(sys.argv[5])
-
-ALPHA = 20
-MAXDEPTH = MD  # 5
-POPSIZE = 20
-PROB_MUTATION = 0.2
-PROB_CROSSOVER = 0.5
-ADD_OR_REMOVE_FACTOR = 0.99
-CONNECTIVES = (impl, conj, disj) if NC == 3 else (impl,)  # (impl,)
-depths = collections.Counter()
+# Whether to abbreviate the statistical output
+ABBREV = False
 
 PHI = unicodedata.lookup('GREEK SMALL LETTER PHI')
 THETA = unicodedata.lookup('GREEK SMALL LETTER THETA')
@@ -41,160 +27,120 @@ DISJ = '∨'
 TSTILE = unicodedata.lookup('RIGHT TACK')
 
 
+# Returns a copy of the original list in a random order
 def shuffled(pop):
     return random.sample(pop, len(pop))
 
 
-def compose(f):
-    def outer(g):
-        @functools.wraps(g)
-        def inner(*args, **kwds):
-            return f(g(*args, **kwds))
-        return inner
-    return outer
+# Wraps the result of a function 'g' in a wrapper 'f'
+# These are the rules of the minimal propositional sequent calculus
+# This presentation of the rules is a little different from normal because
+# formulae are never removed from 'premises' and premises is treated as a set,
+# so there is no need for the structural rules of Contraction, Weakening, or
+# Permutation.
+
+def impl_left(premise, premises, goal):
+    return ByImplLeft, [(premises, premise.a),
+                        (premises | {premise.b}, goal)]
 
 
-def impl_left(formula):
-    def _impl_left(premises, goal):
-        return ByImplLeft, [(premises, formula.a),
-                            (premises | {formula.b}, goal)]
-    return _impl_left
+def conj_left_1(premise, premises, goal):
+    return ByConjLeft1, [(premises | {premise.a}, goal)]
 
 
-def impl_right():
-    def _impl_right(premises, goal):
-        return ByImplRight, [(premises | {goal.a}, goal.b)]
-    return _impl_right
+def conj_left_2(premise, premises, goal):
+    return ByConjLeft2, [(premises | {premise.b}, goal)]
 
 
-def conj_left_1(formula):
-    def _conj_left_1(premises, goal):
-        return ByConjLeft1, [(premises | {formula.a}, goal)]
-    return _conj_left_1
+def disj_left(premise, premises, goal):
+    return ByDisjLeft, [(premises | {premise.a}, goal),
+                        (premises | {premise.b}, goal)]
 
 
-def conj_left_2(formula):
-    def _conj_left_2(premises, goal):
-        return ByConjLeft2, [(premises | {formula.b}, goal)]
-    return _conj_left_2
+def impl_right(premises, goal):
+    return ByImplRight, [(premises | {goal.a}, goal.b)]
 
 
-def conj_right():
-    def _conj_right(premises, goal):
-        return ByConjRight, [(premises, goal.a),
-                             (premises, goal.b)]
-    return _conj_right
+def conj_right(premises, goal):
+    return ByConjRight, [(premises, goal.a),
+                         (premises, goal.b)]
 
 
-def disj_left(formula):
-    def _disj_left(premises, goal):
-        return ByDisjLeft, [(premises | {formula.a}, goal),
-                            (premises | {formula.b}, goal)]
-    return _disj_left
+def disj_right_1(premises, goal):
+    return ByDisjRight1, [(premises, goal.a)]
 
 
-def disj_right_1():
-    def _disj_right_1(premises, goal):
-        return ByDisjRight1, [(premises, goal.a)]
-    return _disj_right_1
+def disj_right_2(premises, goal):
+    return ByDisjRight2, [(premises, goal.b)]
 
 
-def disj_right_2():
-    def _disj_right_2(premises, goal):
-        return ByDisjRight2, [(premises, goal.b)]
-    return _disj_right_2
+def weight(opt):
+    "An extremely simple heuristic - always favour the options in this order"
+
+    options = [
+        ByConjRight,
+        ByDisjLeft,
+        ByImplLeft,
+        ByConjLeft1,
+        ByConjLeft2,
+        ByDisjRight1,
+        ByDisjRight2,
+        ByImplRight
+    ]
+    return options.index(opt[0])
 
 
-def nearby(x, a=0, b=1, alpha=20):
-    """Returns a value near x within the range [a,b]
-
-    alpha - higher means nearer x
-    """
-    v = (x - a) / (b - a)
-    return a + (b - a) * random.betavariate(alpha, alpha * ((1 / v) - 1))
+@memoise
+def consistent_key_option(option):
+    return (option[0].__name__ + '!!' +
+            '!'.join(consistent_key_branch(b)
+                     for b in sorted(option[1], key=consistent_key_branch)))
 
 
-class TimeLimit(BaseException):
-    @staticmethod
-    def throw():
-        raise TimeLimit
+@memoise
+def consistent_key_branch(branch):
+    return (str(branch[1]) + '??' +
+            '?'.join(str(x) for x in sorted(branch[0], key=str)))
 
 
-@contextlib.contextmanager
-def timelimit(limit=1):
-    t = threading.Timer(limit / 1000, _thread.interrupt_main)
-    h = signal.signal(signal.SIGINT, lambda sig, frame: TimeLimit.throw())
-    t.start()
-    yield
-    t.cancel()
-    signal.signal(signal.SIGINT, h)
+def choose_options(stmt, reverse):
+    (premises, goal) = stmt
+
+    # work out all the options
+    options = options_right(premises, goal)
+    for premise in premises:
+        for option in options_left(premise, premises, goal):
+            options.append(option)
+
+    # ensure the options are in a consistent (but arbitrary) order
+    options.sort(key=consistent_key_option)
+
+    # choose the order of them - THIS is the key part, the heuristic!
+    options.sort(reverse=reverse, key=weight)
+
+    return options
 
 
-# try:
-#     with timelimit():
-#         __import__('time').sleep(1)
-# except KeyboardInterrupt as exc:
-#     raise TimeLimit from exc
+def options_right(premises, goal):
+    if isinstance(goal, impl):
+        return [impl_right(premises, goal)]
+    if isinstance(goal, conj):
+        return [conj_right(premises, goal)]
+    if isinstance(goal, disj):
+        return [disj_right_1(premises, goal),
+                disj_right_2(premises, goal)]
+    return []
 
 
-class WeightedHeuristic:
-    NUMWEIGHTS = 1
-
-    def __init__(self, weights):
-        self.weights = weights
-
-    def __repr__(self):
-        w = ','.join(f'{W:.2f}' for W in self.weights)
-        return f'({w})'
-
-    @classmethod
-    def random(cls):
-        weights = [random.random() for i in range(cls.NUMWEIGHTS)]
-        return WeightedHeuristic(weights)
-
-    @staticmethod
-    def crossover(left, right):
-        wl = left.weights
-        wr = right.weights
-        w_ = [random.uniform(l, r) for (l, r) in zip(wl, wr)]
-        return [WeightedHeuristic(w_)]
-
-    def mutate(self):
-        w = [nearby(x, alpha=ALPHA) for x in self.weights]
-        return WeightedHeuristic(w)
-
-    @staticmethod
-    def key(opt):
-        if opt.__name__ in ['_conj_right', '_disj_left', '_impl_left']:
-            return 1
-        else:
-            return 2
-
-    def apply(self, stmt):
-        (premises, goal) = stmt
-        opts = [option for options in map(self.options_left, premises)
-                for option in options]
-        opts2 = self.options_right(goal) + opts
-        opts2.sort(reverse=False, key=self.key)
-        return opts2
-
-    def options_right(self, formula):
-        if isinstance(formula, impl):
-            return [impl_right()]
-        if isinstance(formula, conj):
-            return [conj_right()]
-        if isinstance(formula, disj):
-            return [disj_right_1(), disj_right_2()]
-        return []
-
-    def options_left(self, formula):
-        if isinstance(formula, impl):
-            return [impl_left(formula)]
-        if isinstance(formula, conj):
-            return [conj_left_1(formula), conj_left_2(formula)]
-        if isinstance(formula, disj):
-            return [disj_left(formula)]
-        return []
+def options_left(premise, premises, goal):
+    if isinstance(premise, impl):
+        return [impl_left(premise, premises, goal)]
+    if isinstance(premise, conj):
+        return [conj_left_1(premise, premises, goal),
+                conj_left_2(premise, premises, goal)]
+    if isinstance(premise, disj):
+        return [disj_left(premise, premises, goal)]
+    return []
 
 
 backtrack_stack = [{}]
@@ -216,12 +162,14 @@ def freeze(stmt):
 
 @compose('\n'.join)
 def centre(text, width):
+    """Centre the lines in a multi-line block of text within a given width"""
     for line in text.splitlines():
         yield f'{line:^{width}}'
 
 
 @compose('\n'.join)
 def concat(text1, text2):
+    """Join two multi-line blocks of text horizontally with a space"""
     lines1 = text1.splitlines()
     lines2 = text2.splitlines()
     max1 = max(map(len, lines1))
@@ -239,163 +187,104 @@ class Proof:
         return str(self)
 
     @classmethod
-    def fmtstmt(cls, stmt):
-        premises, goal = stmt
-        p = ', '.join(map(str, premises))
-        # if goal in premises:
-        #     return f'{p} {TSTILE} {goal} *'
-        return f'{p} {TSTILE} {goal}'
+    def fmtsequent(cls, seq):
+        premises, goal = seq
+        ps = ', '.join(str(p) for p in premises)
+        return f'{ps} {TSTILE} {goal}'
 
-    @classmethod
-    def fmtbinary(cls, op, stmt, left, right):
-        root = cls.fmtstmt(stmt)
-        line = concat(str(left), str(right))
-        mwidth = max(width(line), width(root))
-        divider = '-' * mwidth
-        rootC = centre(root, mwidth)
-        lineC = centre(line, mwidth)
-        return f'{rootC}   \n{divider} {op}\n{lineC}'
 
-    @classmethod
-    def fmtunary(cls, op, stmt, result):
-        root = cls.fmtstmt(stmt)
-        res = str(result)
+class NullaryProof(Proof):
+    """A proof with no further steps required"""
+    def __init__(self, result):
+        self.result = result
+
+
+class UnaryProof(Proof):
+    """A proof with one further step required"""
+    def __init__(self, result, a):
+        self.result = result
+        self.a = a
+
+    def fmtunary(self, op):
+        root = self.fmtsequent(self.result)
+        res = str(self.a)
         mwidth = max(width(res), len(root))
         divider = '-' * mwidth
         rootC = centre(root, mwidth)
         resC = centre(res, mwidth)
         return f'{rootC}   \n{divider} {op}\n{resC}'
 
+    @property
+    def size(self):
+        return 1 + self.a.size
 
-class ByAxiom(Proof):
-    def __init__(self, premises, goal):
-        self.premises = premises
-        self.goal = goal
 
-    def __str__(self):
-        p2g1 = self.fmtstmt((self.premises, self.goal))
-        p2g2 = self.fmtstmt(({self.goal}, self.goal))
-        mwidth = max(len(p2g1), len(p2g2))
+class BinaryProof(Proof):
+    """A proof with two further steps required"""
+    def __init__(self, result, a, b):
+        self.result = result
+        self.a = a
+        self.b = b
+
+    def fmtbinary(self, op):
+        root = self.fmtsequent(self.result)
+        line = concat(str(self.a), str(self.b))
+        mwidth = max(width(line), width(root))
         divider = '-' * mwidth
-        divider2 = '-' * len(p2g2)
-        return (f'{p2g1:^{mwidth}}   \n{divider}  W\n' +
-                f'{p2g2 + "   ":^{mwidth}}\n{divider2 + " Ax":^{mwidth}}')
+        rootC = centre(root, mwidth)
+        lineC = centre(line, mwidth)
+        return f'{rootC}   \n{divider} {op}\n{lineC}'
+
+    @property
+    def size(self):
+        return 1 + self.a.size + self.b.size
+
+
+class ByAxiom(NullaryProof):
+    def __str__(self):
+        seq = self.fmtsequent(self.result)
+        divider = '-' * len(seq)
+        return f'{seq}   \n{divider} Ax'
 
     @property
     def size(self):
         return 1
 
 
-class ByConjLeft1(Proof):
-    def __init__(self, ganb2c, ga2c):
-        self.ganb2c = ganb2c
-        self.ga2c = ga2c
-
-    def __str__(self):
-        return self.fmtunary(CONJ + 'L', self.ganb2c, self.ga2c)
-
-    @property
-    def size(self):
-        return 1 + self.ga2c.size
+def unaryrule(symbol1, symbol2):
+    class Rule(UnaryProof):
+        def __str__(self):
+            return self.fmtunary(globals()[symbol1] + symbol2[0])
+    Rule.__name__ = f'By{symbol1.title()}{symbol2.title()}'
+    Rule.__qualname__ = f'unaryrule.<locals>.{Rule.__name__}'
+    return Rule
 
 
-class ByConjLeft2(Proof):
-    def __init__(self, ganb2c, gb2c):
-        self.ganb2c = ganb2c
-        self.gb2c = gb2c
-
-    def __str__(self):
-        return self.fmtunary(CONJ + 'L', self.ganb2c, self.gb2c)
-
-    @property
-    def size(self):
-        return 1 + self.gb2c.size
+def binaryrule(symbol1, symbol2):
+    class Rule(BinaryProof):
+        def __str__(self):
+            return self.fmtbinary(globals()[symbol1] + symbol2[0])
+    Rule.__name__ = f'By{symbol1.title()}{symbol2.title()}'
+    Rule.__qualname__ = f'binaryrule.<locals>.{Rule.__name__}'
+    return Rule
 
 
-class ByConjRight(Proof):
-    def __init__(self, g2anb, g2a, g2b):
-        self.g2anb = g2anb
-        self.g2a = g2a
-        self.g2b = g2b
+ByConjRight = binaryrule('CONJ', 'RIGHT')
+ByConjLeft1 = unaryrule('CONJ', 'LEFT')
+ByConjLeft2 = unaryrule('CONJ', 'LEFT')
 
-    def __str__(self):
-        return self.fmtbinary(CONJ + 'R', self.g2anb, self.g2a, self.g2b)
+ByImplLeft = binaryrule('IMPL', 'LEFT')
+ByImplRight = unaryrule('IMPL', 'RIGHT')
 
-    @property
-    def size(self):
-        return 1 + self.g2a.size + self.g2b.size
-
-
-class ByDisjRight1(Proof):
-    def __init__(self, g2aob, g2a):
-        self.g2aob = g2aob
-        self.g2a = g2a
-
-    def __str__(self):
-        return self.fmtunary(DISJ + 'R', self.g2aob, self.g2a)
-
-    @property
-    def size(self):
-        return 1 + self.g2a.size
-
-
-class ByDisjRight2(Proof):
-    def __init__(self, g2aob, g2b):
-        self.g2aob = g2aob
-        self.g2b = g2b
-
-    def __str__(self):
-        return self.fmtunary(DISJ + 'R', self.g2aob, self.g2b)
-
-    @property
-    def size(self):
-        return 1 + self.g2b.size
-
-
-class ByDisjLeft(Proof):
-    def __init__(self, gaob2c, ga2c, gb2c):
-        self.gaob2c = gaob2c
-        self.ga2c = ga2c
-        self.gb2c = gb2c
-
-    def __str__(self):
-        return self.fmtbinary(DISJ + 'L', self.gaob2c, self.ga2c, self.gb2c)
-
-    @property
-    def size(self):
-        return 1 + self.ga2c.size + self.gb2c.size
-
-
-class ByImplLeft(Proof):
-    def __init__(self, gaib2c, g2a, gb2c):
-        self.gaib2c = gaib2c
-        self.g2a = g2a
-        self.gb2c = gb2c
-
-    def __str__(self):
-        return self.fmtbinary(IMPL + 'L', self.gaib2c, self.g2a, self.gb2c)
-
-    @property
-    def size(self):
-        return 1 + self.g2a.size + self.gb2c.size
-
-
-class ByImplRight(Proof):
-    def __init__(self, g2aib, ga2b):
-        self.g2aib = g2aib
-        self.ga2b = ga2b
-
-    def __str__(self):
-        return self.fmtunary(IMPL + 'R', self.g2aib, self.ga2b)
-
-    @property
-    def size(self):
-        return 1 + self.ga2b.size
+ByDisjLeft = binaryrule('DISJ', 'LEFT')
+ByDisjRight1 = unaryrule('DISJ', 'RIGHT')
+ByDisjRight2 = unaryrule('DISJ', 'RIGHT')
 
 
 class Prover:
-    def __init__(self, heuristic):
-        self.heuristic = heuristic
+    def __init__(self, restrict_axiom, reverse_heuristic):
+        self.restrict_axiom = restrict_axiom
+        self.reverse_heuristic = reverse_heuristic
         self.inprogress = collections.ChainMap({})
         self.proved = {}
         self.failed = set()
@@ -432,62 +321,60 @@ class Prover:
     def backtrack(self):
         self.inprogress = self.inprogress.parents
 
-    def do_prove(self, statement):
-        premises, goal = statement
+    def do_prove(self, sequent):
+        premises, goal = sequent
+
         # We can restrict the A |- A rule to only atomic formulas. Every proof
         # that can be done with that restriction can be done without it, but
-        # they're longer just include a few more (trivial) steps, so we don't
-        # do so.
-        #    if goal in premises and isinstance(goal, atomic):
-        #        return ByAxiom(premises, goal)
-        # This gives us intuitionistic logic:
-        #    if bot in premises:
-        #        return ByAxiom(premises, goal)
-        if RA == 1:
+        # they're longer as they include a few more (trivial) steps.
+        if self.restrict_axiom == 1:
             if goal in premises and isinstance(goal, atomic):
-                # print('TRIVIAL   ', Proof.fmtstmt(statement))
-                return ByAxiom(premises, goal)
+                return ByAxiom((premises, goal))
         else:
             if goal in premises:
-                # print('TRIVIAL   ', Proof.fmtstmt(statement))
-                return ByAxiom(premises, goal)
+                return ByAxiom((premises, goal))
 
-        if self.isproved(statement):
-            # print('PROVED    ', Proof.fmtstmt(statement))
-            return self.getproof(statement)
-        if self.hasfailed(statement):
-            # print('FAILED    ', Proof.fmtstmt(statement))
+        # Memoise proofs
+        if self.isproved(sequent):
+            return self.getproof(sequent)
+
+        # Memoise failures to prove
+        if self.hasfailed(sequent):
             raise Backtrack
-        if self.isinprogress(statement):
-            # print('INPROGRESS', Proof.fmtstmt(statement))
+
+        # Don't get into trivial infinite loops
+        if self.isinprogress(sequent):
             raise Backtrack
-        # print('TRYING    ', Proof.fmtstmt(statement))
-        # if freeze(statement) not in seen_ever:
-        #     print('seen', Proof.fmtstmt(statement))
-        # if freeze(statement) in seen():
-        #     if seen()[freeze(statement)] is None:
-        #         raise Backtrack
-        #     return seen()[freeze(statement)]
+
         try:
-            self.markinprogress(statement)
-            options = self.heuristic.apply(statement)
+            self.markinprogress(sequent)
+            options = choose_options(sequent, self.reverse_heuristic)
             for option in options:
                 results = []
+
                 try:
-                    name, stmts = option(*statement)
+                    name, stmts = option
                     for stmt in stmts:
                         results.append(self.do_prove(stmt))
                 except Backtrack:
+                    # Stop backtracking, because we're at a point where we can
+                    # make a different decision
                     continue
-                proof = name(statement, *results)
-                self.markproved(statement, proof)
+
+                proof = name(sequent, *results)
+
+                # Memoise proofs
+                self.markproved(sequent, proof)
                 return proof
-            self.markfailed(statement)
+
+            # We ran out of options - backtrack
+            self.markfailed(sequent)
             raise Backtrack
         except Backtrack:
+            # Wind back the state of the prover
             self.backtrack()
             raise
-        raise RuntimeError('Should never get here under normal circumstances')
+        raise RuntimeError('Should never get here')
 
     def prove(self, statement):
         try:
@@ -496,59 +383,58 @@ class Prover:
             return None
 
 
-def evaluate(implications):
-    def _evaluate(heur):
-        successes = 0
-        timeouts = 0
-        total = 0
-        sizes = []
-        for statement in random_statements():  # implications:
-            try:
-                with timelimit(500):
-                    prover = Prover(heur)
-                    proof = prover.prove(statement)
-            except TimeLimit:
-                # print('TIMED OUT')
-                timeouts += 1
-                proof = None
-            if proof is not None:
-                # print(proof)
-                successes += 1
-                sizes.append(proof.size)
-                if proof.size > 10000:
-                    print(proof.size, Proof.fmtstmt(statement))
-            else:
-                pass
-                # print('not minimally provable:')
-                # print(Proof.fmtstmt(statement))
-            total += 1
-            # print(f'{successes}/{total}: {int(100 * (successes / total))}%')
-            # print(f'{timeouts}/{total}: {int(100 * (timeouts / total))}%')
-            # if len(sizes) % 1000 == 0 and len(sizes) != 0:
-            #     print(f'average size: {sum(sizes) / len(sizes):.1f}')
-            # print(successes, total, int(100 * (successes / total)))
-            # print(timeouts, total, int(100 * (timeouts / total)))
-        # print('DONE')
-        mean = statistics.mean(sizes)
-        median = statistics.median_low(sizes)
-        mode = statistics.mode(sizes)
-        skewness = stats.skewness(sizes, mean)
-        variance = statistics.variance(sizes, mean)
-        excess_kurtosis = stats.excess_kurtosis(sizes, mean)
+def evaluate(restrict_axiom, reverse_heuristic, implications):
+    successes = 0
+    timeouts = 0
+    total = 0
+    sizes = []
+    for statement in implications:
+        try:
+            #with timelimit(500):
+                prover = Prover(restrict_axiom, reverse_heuristic)
+                proof = prover.prove(statement)
+        except TimeLimit:
+            # print('TIMED OUT')
+            timeouts += 1
+            proof = None
+        if proof is not None:
+            # print(proof)
+            successes += 1
+            sizes.append(proof.size)
+            if proof.size > 10000:
+                pass  # print(proof.size, Proof.fmtsequent(statement))
+        else:
+            pass
+            # print('not minimally provable:')
+            # print(Proof.fmtsequent(statement))
+        total += 1
 
-        if ABBREV:
-            print(f'{mean:.2f}, {median}, {mode},', end=' ')
-            print(f'{skewness:.2f}, {variance:.2f}, {excess_kurtosis:.2f}')
-            exit()
+    print(f'Successes: {successes}/{total}: {int(100 * (successes / total))}%')
+    print(f'Timeouts: {timeouts}/{total}: {int(100 * (timeouts / total))}%')
+
+    mean = statistics.mean(sizes)
+    median = statistics.median_low(sizes)
+    most_common = collections.Counter(sizes).most_common(3)
+    longest = max(sizes)
+    shortest = min(sizes)
+    # most_common = collections.Counter(sizes).most_common(1)[0][0]
+    skewness = stats.skewness(sizes, mean)
+    variance = statistics.variance(sizes, mean)
+    excess_kurtosis = stats.excess_kurtosis(sizes, mean)
+
+    if ABBREV:
+        print(f'{mean:.2f}, {median}, {most_common},', end=' ')
+        print(f'{skewness:.2f}, {variance:.2f}, {excess_kurtosis:.2f}')
+    else:
         print(f'mean: {mean}')
         print(f'median: {median}')
-        print(f'mode: {mode}')
+        print(f'most_common: {most_common}')
+        print(f'shortest: {shortest}')
+        print(f'longest: {longest}')
         print(f'skewness: {skewness}')
         print(f'variance: {variance}')
         print(f'excess kurtosis: {excess_kurtosis}')
-        raise
-        return total / len(implications)
-    return _evaluate
+    return total / len(implications)
 
 
 pA = atomic('A')
@@ -610,61 +496,94 @@ implications = [
 ]
 
 
-def random_statements():
-    # return [(frozenset({(pA > pA) > pB}), (pA > pA) > pB)]
+def random_statements(allow_dups, max_depth, connectives, num_stmts=None):
+    base_formulae = [pA, pB, pC, ~pA, ~pB, ~pC]
+    if num_stmts is None:
+        num_stmts = 10000
     stmts = []
-    while len(stmts) < NUMSTMTS:
-        formula = rand.rand_lt_depth(MAXDEPTH,
-                                     [pA, pB, pC, ~pA, ~pB, ~pC],
-                                     CONNECTIVES)
+    while len(stmts) < num_stmts:
+        if allow_dups:
+            formula = rand.rand_lt_depth(max_depth, base_formulae, connectives)
+        else:
+            formula = rand.rand_lt_depth_nodups(max_depth, base_formulae, connectives)
         if sat.tautological(formula):
-            # if len(stmts) % 1000 == 0:
-                # print(len(stmts), formula)
             stmts.append((frozenset(), formula))
-    print(f'generated {NUMSTMTS} statements')
+    print(f'generated {num_stmts} statements')
     return list(stmts)
 
 
-def main():
-    lastgen = None
-    newgen = [WeightedHeuristic.random() for i in range(POPSIZE)]
-    # print(f'{", ".join(map(str, premises))} {TSTILE} {goal}')
-    for generation in itertools.count():
-        lastgen, newgen = newgen, []
-
-        for i, indiv in enumerate(lastgen):
-            if random.random() < PROB_CROSSOVER:
-                idx = random.randrange(len(lastgen))
-                new = WeightedHeuristic.crossover(indiv, lastgen[idx])
-                for x in new:
-                    newgen.append(x)
-            else:
-                newgen.append(indiv)
-
-        m = [x.mutate() for x in newgen if random.random() < PROB_MUTATION]
-        newgen.extend(m)
-
-        # print('Before pruning:')
-        # print(newgen)
-
-        # STRICT ELITISM
-        # newgen.sort(key=Heuristic.fitness(goal, premises), reverse=True)
-        # newgen = newgen[:POPSIZE]
-
-        # WEIGHTED ELITISM
-        # print(newgen)
-        weights = map(evaluate(implications), newgen)
-        newgen = random.choices(newgen, weights, k=POPSIZE)
-
-        # print('After pruning:')
-        # if generation % 3000 == 0:
-        if 1:
-            print(f'Generation {generation}:')
-            print(newgen)
-
-        # print(depths)
+def generate_main(args):
+    if args.connectives == 1:
+        conns = [impl]
+    elif args.connectives == 3:
+        conns = [impl, conj, disj]
+    else:
+        raise NotImplementedError
+    stmts = random_statements(args.allow_dups, args.max_depth, conns, args.statements)
+    pickle.dump(stmts, args.output)
 
 
+def stats_main(args):
+    # # Handle command-line arguments
+    # if not (6 <= len(sys.argv) <= 7):
+    #     print(f'Usage: ./exp2.py SHOULD_REVERSE MAXDEPTH NUM_CONNECTIVES '
+    #           f'RESTRICT_AXIOM NO_DUPS [NUM_STMTS = 10000]')
+    #     exit()
+    # init(sys.argv)
+    #
+    with args.input as f:
+        data = pickle.load(f)
+    evaluate(args.restrict_axiom, args.reverse, data)
+
+
+# The code inside this if statement runs if you run this file directly, but not
+# if you import this file.
 if __name__ == '__main__':
+    # Remove the default recursion limit of 1000
+    # I think Python would crash before it got to this new limit
     sys.setrecursionlimit(1000000)
-    main()
+
+    parser = argparse.ArgumentParser(description='Theorem prover')
+
+    subparsers = parser.add_subparsers()
+    parser_stats = subparsers.add_parser(
+        'stats', aliases=['s', 'stat'],
+        help='Determine some statistics about the formulae')
+    parser_stats.add_argument(
+        '--input', metavar='FILE', type=argparse.FileType('rb'),
+        help='A file containing a list of formulae')
+    parser_stats.add_argument(
+        '--restrict-axiom', action='store_true',
+        help='Whether to restrict the axiom rule to just atomic formulae')
+    parser_stats.add_argument(
+        '--reverse', action='store_true', default=False,
+        help='Reverse the heuristic')
+
+    parser_stats.set_defaults(main=stats_main)
+
+    parser_generate = subparsers.add_parser(
+        'generate', aliases=['g', 'gen'],
+        help='Generate and store a list of formulae')
+    parser_generate.add_argument(
+        '--output', metavar='FILE', type=argparse.FileType('wb'),
+        help='Where to put the generated formulae')
+    parser_generate.add_argument(
+        '--allow-dups', action='store_true', default=False,
+        help='Whether to allow formulae like ((a -> a) -> b) and '
+             '((a -> b) -> (a -> b))')
+    parser_generate.add_argument(
+        '--max-depth', type=int, required=True,
+        help='The maximum depth of a generated formula')
+    parser_generate.add_argument(
+        '--connectives', type=int, default=1,
+        help='The number of connectives to use (1 = impl, 3 = impl/conj/disj)')
+    parser_generate.add_argument(
+        '--statements', type=int,
+        help='The number of statements to generate')
+    parser_generate.set_defaults(main=generate_main)
+
+    args = parser.parse_args()
+    if hasattr(args, 'main') and args.main is not None:
+        args.main(args)
+    else:
+        parser.print_usage()

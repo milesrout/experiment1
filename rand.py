@@ -1,5 +1,4 @@
 import random
-from exp2 import ND
 
 
 def iterate(f, n, variables=2, connectives=3):
@@ -33,10 +32,17 @@ def rand_lt_depth(depth, base_formulae, connectives):
 
     c, v = len(connectives), len(base_formulae)
     d = random_depth(depth, samples=1, num_variables=v, num_connectives=c)[-1]
-    if ND == 1:
-        return rand_eq_depth_nodups(d, base_formulae, connectives)
-    else:
-        return rand_eq_depth(d, base_formulae, connectives)
+    return rand_eq_depth(d, base_formulae, connectives)
+
+
+def rand_lt_depth_nodups(depth, base_formulae, connectives):
+    if depth == 0:
+        # return formula.atomic(random.choice(variables))
+        return choose_formula(base_formulae)
+
+    c, v = len(connectives), len(base_formulae)
+    d = random_depth(depth, samples=1, num_variables=v, num_connectives=c)[-1]
+    return rand_eq_depth_nodups(d, base_formulae, connectives)
 
 
 def rand_eq_depth(depth, base_formulae, connectives):
@@ -88,8 +94,8 @@ def rand_eq_depth_nodups(depth, base_formulae, connectives):
             form2 = rand_eq_depth_nodups(depth - 1, base_formulae, connectives)
         return conn(form1, form2)
     elif k < a + b:
-        return conn(rand_lt_depth(depth - 1, base_formulae, connectives),
+        return conn(rand_lt_depth_nodups(depth - 1, base_formulae, connectives),
                     rand_eq_depth_nodups(depth - 1, base_formulae, connectives))
     else:
         return conn(rand_eq_depth_nodups(depth - 1, base_formulae, connectives),
-                    rand_lt_depth(depth - 1, base_formulae, connectives))
+                    rand_lt_depth_nodups(depth - 1, base_formulae, connectives))
