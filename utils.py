@@ -22,14 +22,23 @@ def timelimit(limit=1):
     signal.signal(signal.SIGINT, h)
 
 
+def frozen(x):
+    a, b = x
+    if isinstance(b, list):
+        b = tuple(b)
+    if isinstance(a, set):
+        a = frozenset(a)
+    return a, b
+
+
 def memoise(f):
     memory = {}
 
     @functools.wraps(f)
     def wrapper(o):
-        if id(o) not in memory:
-            memory[id(o)] = f(o)
-        return memory[id(o)]
+        if frozen(o) not in memory:
+            memory[frozen(o)] = f(o)
+        return memory[frozen(o)]
     return wrapper
 
 

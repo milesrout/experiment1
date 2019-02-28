@@ -15,6 +15,14 @@ import sat
 import stats
 from utils import TimeLimit, timelimit, memoise, compose
 
+# If this parameter is False, formulae are removed from premises when they are
+# used. Oddly this doesn't seem to reduce the number of formulae that are
+# provable.
+KEEP_USED_PREMISES = True
+
+# Whether to print out the steps while backtracking/proving
+DEBUG_PROOF_STEPS = False
+
 # Whether to abbreviate the statistical output
 ABBREV = False
 
@@ -32,29 +40,42 @@ def shuffled(pop):
     return random.sample(pop, len(pop))
 
 
-# Wraps the result of a function 'g' in a wrapper 'f'
-# These are the rules of the minimal propositional sequent calculus
-# This presentation of the rules is a little different from normal because
-# formulae are never removed from 'premises' and premises is treated as a set,
-# so there is no need for the structural rules of Contraction, Weakening, or
-# Permutation.
+# These are the rules of the minimal propositional sequent calculus. This
+# presentation of the rules is a little different from normal because formulae
+# are never removed from 'premises' and premises is treated as a set, so there
+# is no need for the structural rules of Contraction, Weakening,
+# or Permutation.
 
 def impl_left(premise, premises, goal):
-    return ByImplLeft, [(premises, premise.a),
-                        (premises | {premise.b}, goal)]
+    if KEEP_USED_PREMISES:
+        return ByImplLeft, [(premises, premise.a),
+                            (premises | {premise.b}, goal)]
+    else:
+        return ByImplLeft, [(premises - {premise}, premise.a),
+                            (premises - {premise} | {premise.b}, goal)]
 
 
 def conj_left_1(premise, premises, goal):
-    return ByConjLeft1, [(premises | {premise.a}, goal)]
+    if KEEP_USED_PREMISES:
+        return ByConjLeft1, [(premises | {premise.a}, goal)]
+    else:
+        return ByConjLeft1, [(premises - {premise} | {premise.a}, goal)]
 
 
 def conj_left_2(premise, premises, goal):
-    return ByConjLeft2, [(premises | {premise.b}, goal)]
+    if KEEP_USED_PREMISES:
+        return ByConjLeft2, [(premises | {premise.b}, goal)]
+    else:
+        return ByConjLeft2, [(premises - {premise} | {premise.b}, goal)]
 
 
 def disj_left(premise, premises, goal):
-    return ByDisjLeft, [(premises | {premise.a}, goal),
-                        (premises | {premise.b}, goal)]
+    if KEEP_USED_PREMISES:
+        return ByDisjLeft, [(premises | {premise.a}, goal),
+                            (premises | {premise.b}, goal)]
+    else:
+        return ByDisjLeft, [(premises - {premise} | {premise.a}, goal),
+                            (premises - {premise} | {premise.b}, goal)]
 
 
 def impl_right(premises, goal):
@@ -74,13 +95,13 @@ def disj_right_2(premises, goal):
     return ByDisjRight2, [(premises, goal.b)]
 
 
-def weight(opt):
+def simplistic_weight(opt):
     "An extremely simple heuristic - always favour the options in this order"
 
     options = [
+        ByImplLeft,
         ByConjRight,
         ByDisjLeft,
-        ByImplLeft,
         ByConjLeft1,
         ByConjLeft2,
         ByDisjRight1,
@@ -103,12 +124,13 @@ def consistent_key_branch(branch):
             '?'.join(str(x) for x in sorted(branch[0], key=str)))
 
 
-def choose_options(stmt, reverse):
+def choose_options(stmt, weight):
     (premises, goal) = stmt
 
     # work out all the options
     options = options_right(premises, goal)
-    for premise in premises:
+
+    for premise in sorted(premises, key=lambda x: consistent_key_branch(({x}, 'a'))):
         for option in options_left(premise, premises, goal):
             options.append(option)
 
@@ -116,12 +138,13 @@ def choose_options(stmt, reverse):
     options.sort(key=consistent_key_option)
 
     # choose the order of them - THIS is the key part, the heuristic!
-    options.sort(reverse=reverse, key=weight)
+    options.sort(key=weight)
 
     return options
 
 
 def options_right(premises, goal):
+    """All the possible next steps from the goal"""
     if isinstance(goal, impl):
         return [impl_right(premises, goal)]
     if isinstance(goal, conj):
@@ -133,6 +156,7 @@ def options_right(premises, goal):
 
 
 def options_left(premise, premises, goal):
+    """All the possible next steps from the given premise"""
     if isinstance(premise, impl):
         return [impl_left(premise, premises, goal)]
     if isinstance(premise, conj):
@@ -143,18 +167,25 @@ def options_left(premise, premises, goal):
     return []
 
 
-backtrack_stack = [{}]
-seen_ever = {}
-
-
-def seen():
-    return backtrack_stack[-1]
-
-
-class Backtrack(BaseException):
+# A 'loop' backtrack is where we backtrack because we tried to prove something
+# that we were already trying to prove i.e. while trying to prove P we had to
+# prove Q and while trying to prove Q we had to prove P.
+# If something cannot be proved because of 'loop' backtracks only, it isn't
+# marked as unprovable.
+class LoopBacktrack(BaseException):
     pass
 
 
+# A 'fail' backtrack is where we backtrack because we ran out of options for
+# proving something, or because we tried to prove something that we've
+# previously marked as unprovable. If something cannot be proved because of a
+# 'fail' backtrack, it is marked as unprovable.
+class FailBacktrack(BaseException):
+    pass
+
+
+# Non-frozen sets (mutable sets) cannot be used as keys in dictionaries or
+# elements of sets.
 def freeze(stmt):
     premises, goal = stmt
     return frozenset(premises), goal
@@ -189,7 +220,7 @@ class Proof:
     @classmethod
     def fmtsequent(cls, seq):
         premises, goal = seq
-        ps = ', '.join(str(p) for p in premises)
+        ps = ', '.join(str(p) for p in sorted(premises, key=str))
         return f'{ps} {TSTILE} {goal}'
 
 
@@ -282,9 +313,9 @@ ByDisjRight2 = unaryrule('DISJ', 'RIGHT')
 
 
 class Prover:
-    def __init__(self, restrict_axiom, reverse_heuristic):
+    def __init__(self, restrict_axiom, heuristic):
         self.restrict_axiom = restrict_axiom
-        self.reverse_heuristic = reverse_heuristic
+        self.heuristic = heuristic
         self.inprogress = collections.ChainMap({})
         self.proved = {}
         self.failed = set()
@@ -298,7 +329,7 @@ class Prover:
     def isinprogress(self, sequent):
         p0, g0 = sequent
         for p, g in self.inprogress:
-            if g == g0 and p0 <= p:
+            if g0 == g and p0 <= p:
                 return True
         return False
 
@@ -316,10 +347,16 @@ class Prover:
         self.proved[sequent] = proof
 
     def markfailed(self, sequent):
+        print('FAILED:', Proof.fmtsequent(sequent))
         self.failed.add(sequent)
 
     def backtrack(self):
         self.inprogress = self.inprogress.parents
+
+    def print_failed(self):
+        print('FAILURES:')
+        for seq in self.failed:
+            print(Proof.fmtsequent(seq))
 
     def do_prove(self, sequent):
         premises, goal = sequent
@@ -340,23 +377,48 @@ class Prover:
 
         # Memoise failures to prove
         if self.hasfailed(sequent):
-            raise Backtrack
+            if DEBUG_PROOF_STEPS:
+                print(' ' * len(self.inprogress) + 'failed already:',
+                      Proof.fmtsequent(sequent))
+            raise FailBacktrack
 
         # Don't get into trivial infinite loops
         if self.isinprogress(sequent):
-            raise Backtrack
+            if DEBUG_PROOF_STEPS:
+                print(' ' * len(self.inprogress) + 'loop:',
+                      Proof.fmtsequent(sequent))
+            raise LoopBacktrack
 
+        self.bookmark()
         try:
             self.markinprogress(sequent)
-            options = choose_options(sequent, self.reverse_heuristic)
+            options = choose_options(sequent, self.heuristic)
+
+            fail_backtrack = False
             for option in options:
                 results = []
 
                 try:
                     name, stmts = option
+                    if DEBUG_PROOF_STEPS:
+                        print(name.__name__, Proof.fmtsequent(sequent))
+                        for stmt in stmts:
+                            print(' ' * len(self.inprogress), end='')
+                            print(Proof.fmtsequent(stmt))
                     for stmt in stmts:
                         results.append(self.do_prove(stmt))
-                except Backtrack:
+                except LoopBacktrack:
+                    if DEBUG_PROOF_STEPS:
+                        print(' ' * len(self.inprogress) + '<==')
+
+                    # Stop backtracking, because we're at a point where we can
+                    # make a different decision
+                    continue
+                except FailBacktrack:
+                    fail_backtrack = True
+                    if DEBUG_PROOF_STEPS:
+                        print(' ' * len(self.inprogress) + '<==')
+
                     # Stop backtracking, because we're at a point where we can
                     # make a different decision
                     continue
@@ -365,12 +427,18 @@ class Prover:
 
                 # Memoise proofs
                 self.markproved(sequent, proof)
+
+                # The current sequent is no longer in progress (we proved it)
+                self.backtrack()
+
                 return proof
 
             # We ran out of options - backtrack
-            self.markfailed(sequent)
-            raise Backtrack
-        except Backtrack:
+            if fail_backtrack:
+                self.markfailed(sequent)
+                raise FailBacktrack
+            raise LoopBacktrack
+        except (LoopBacktrack, FailBacktrack):
             # Wind back the state of the prover
             self.backtrack()
             raise
@@ -379,34 +447,43 @@ class Prover:
     def prove(self, statement):
         try:
             return self.do_prove(freeze(statement))
-        except Backtrack:
+        except (FailBacktrack, LoopBacktrack):
             return None
 
 
-def evaluate(restrict_axiom, reverse_heuristic, implications):
+def evaluate(restrict_axiom, heuristic, implications):
     successes = 0
     timeouts = 0
     total = 0
     sizes = []
     for statement in implications:
         try:
-            #with timelimit(500):
-                prover = Prover(restrict_axiom, reverse_heuristic)
+            # with timelimit(500):
+                prover = Prover(restrict_axiom, heuristic)
                 proof = prover.prove(statement)
         except TimeLimit:
             # print('TIMED OUT')
             timeouts += 1
             proof = None
         if proof is not None:
-            # print(proof)
+            if len(implications) <= 25:
+                proof_str = str(proof)
+                if width(proof_str) <= 120:
+                    print(f'Proof of {Proof.fmtsequent(statement)}:')
+                    print(proof_str)
+                else:
+                    print(f'Proof of {Proof.fmtsequent(statement)} is too '
+                          f'wide: {width(proof_str)} characters')
+                print()
             successes += 1
             sizes.append(proof.size)
-            if proof.size > 10000:
-                pass  # print(proof.size, Proof.fmtsequent(statement))
+            if len(implications) < 40:
+                if proof.size > 10000:
+                    print(proof.size, Proof.fmtsequent(statement))
         else:
-            pass
-            # print('not minimally provable:')
-            # print(Proof.fmtsequent(statement))
+            if len(implications) < 40:
+                print('not minimally provable:')
+                print(Proof.fmtsequent(statement))
         total += 1
 
     print(f'Successes: {successes}/{total}: {int(100 * (successes / total))}%')
@@ -460,6 +537,13 @@ wlem = lambda pa: ~pa | ~~pa
 
 
 implications = [
+    # Some things that definitely aren't provable in minimal logic
+    (set(), dne(pA)),
+    (set(), lem(pA)),
+    (set(), efq(pA)),
+    (set(), wlem(pA)),
+    (set(), dgp(pA, pB)),
+    (set(), pp(pA, pB)),
     # 4.1, P6 and DNE are equivalent
     (set(), dne(pA) > p6(pA)),
     ({dne(pA)}, p6(pA)),
@@ -505,7 +589,8 @@ def random_statements(allow_dups, max_depth, connectives, num_stmts=None):
         if allow_dups:
             formula = rand.rand_lt_depth(max_depth, base_formulae, connectives)
         else:
-            formula = rand.rand_lt_depth_nodups(max_depth, base_formulae, connectives)
+            formula = rand.rand_lt_depth_nodups(max_depth, base_formulae,
+                                                connectives)
         if sat.tautological(formula):
             stmts.append((frozenset(), formula))
     print(f'generated {num_stmts} statements')
@@ -519,21 +604,25 @@ def generate_main(args):
         conns = [impl, conj, disj]
     else:
         raise NotImplementedError
-    stmts = random_statements(args.allow_dups, args.max_depth, conns, args.statements)
+    stmts = random_statements(args.allow_dups, args.max_depth,
+                              conns, args.statements)
     pickle.dump(stmts, args.output)
 
 
 def stats_main(args):
-    # # Handle command-line arguments
-    # if not (6 <= len(sys.argv) <= 7):
-    #     print(f'Usage: ./exp2.py SHOULD_REVERSE MAXDEPTH NUM_CONNECTIVES '
-    #           f'RESTRICT_AXIOM NO_DUPS [NUM_STMTS = 10000]')
-    #     exit()
-    # init(sys.argv)
-    #
-    with args.input as f:
-        data = pickle.load(f)
-    evaluate(args.restrict_axiom, args.reverse, data)
+    global DEBUG_PROOF_STEPS
+    if args.debug:
+        DEBUG_PROOF_STEPS = True
+    if args.use_fixed:
+        data = implications
+    else:
+        with args.input as f:
+            data = pickle.load(f)
+    if args.reverse:
+        heuristic = simplistic_weight
+    else:
+        heuristic = lambda x: 1 / (1 + simplistic_weight(x))
+    evaluate(args.restrict_axiom, heuristic, data)
 
 
 # The code inside this if statement runs if you run this file directly, but not
@@ -553,8 +642,14 @@ if __name__ == '__main__':
         '--input', metavar='FILE', type=argparse.FileType('rb'),
         help='A file containing a list of formulae')
     parser_stats.add_argument(
-        '--restrict-axiom', action='store_true',
+        '--use-fixed', action='store_true', default=False,
+        help='Use a fixed set of formulae instead of formulae from a file')
+    parser_stats.add_argument(
+        '--restrict-axiom', action='store_true', default=False,
         help='Whether to restrict the axiom rule to just atomic formulae')
+    parser_stats.add_argument(
+        '--debug', action='store_true', default=False,
+        help='Debug the proof steps')
     parser_stats.add_argument(
         '--reverse', action='store_true', default=False,
         help='Reverse the heuristic')
