@@ -1,0 +1,46 @@
+=============================
+
+Consistent results over multiple runs (and fast convergence):
+
+This is with the fitness function being the time taken to prove 200 random
+statements (the set of statements being fixed w.r.t the heuristics, at a
+single set of 200 statements for each generation).
+
+→R,∧L1,∧L2,∨R2,∨R1,∧R,→L,∨L        --pop-size 20 --num-connectives 3 --num-stmts 200 --max-depth 5 (1160 generations)
+→R,∧L1,∧L2,∨R2,∨R1,∧R,→L,∨L        --pop-size 20 --num-connectives 3 --num-stmts 200 --max-depth 5 (8 generations)
+
+=============================
+
+Interesting generation1 that generates a really good heuristic (->R and ^R
+both at the beginning and vL at the end) and a really awful heuristic (vL, ->L
+and vR2 all at the beginning). The difference between their performance is
+noticeable (200 do_prove calls vs 1408 on average over the 200 formulae).
+
+Generation 1
+→R,∧R,∧L1,∧L2,∨R1,→L,∨R2,∨L|0.62,0.52,0.92,0.58,0.58,0.62,0.86,0.38 200.600 0.191
+∧L1,∨R2,→L,→R,∧L2,∨R1,∧R,∨L|0.53,0.80,0.99,0.30,0.69,0.74,0.50,0.59 221.667 0.191
+∧L1,→L,∨R1,→R,∧R,∧L2,∨L,∨R2|0.26,0.66,0.75,0.24,0.74,0.43,0.79,0.63 306.400 0.132
+∨R1,→R,∧R,∧L1,∧L2,→L,∨L,∨R2|0.64,0.25,0.73,0.54,0.54,0.07,1.00,0.25 312.375 0.171
+∨R1,→R,∧R,∧L1,∧L2,→L,∨L,∨R2|0.64,0.25,0.73,0.54,0.54,0.07,1.00,0.25 312.375 0.171
+∧L1,→L,→R,∧L2,∨R1,∨R2,∧R,∨L|0.53,0.95,0.95,0.20,0.72,0.75,0.91,0.69 338.583 0.237
+→R,∧L1,→L,∨R1,∧L2,∨R2,∧R,∨L|0.62,0.82,0.92,0.58,0.70,0.66,0.78,0.52 365.083 0.178
+∧R,∨R2,→R,∧L2,∧L1,→L,∨R1,∨L|0.66,0.22,0.78,0.60,0.48,0.77,0.25,0.29 421.714 0.151
+∧L2,∧L1,→R,→L,∨R1,∧R,∨R2,∨L|0.33,0.69,0.79,0.20,0.19,0.48,0.69,0.29 453.882 0.171
+∨R2,∧R,∧L1,∨R1,→R,∧L2,→L,∨L|0.60,0.34,0.99,0.34,0.51,0.45,0.03,0.50 464.933 0.112
+-----
+∧L2,∧L1,→R,∨R2,∨R1,→L,∧R,∨L|0.47,0.51,0.99,0.24,0.24,0.46,0.42,0.37 466.105 0.217
+∧L2,∧L1,→L,→R,∨R1,∨R2,∧R,∨L|0.31,0.80,0.99,0.24,0.21,0.47,0.77,0.32 468.875 0.197
+∨R2,→L,∧L1,∧R,→R,∨R1,∨L,∧L2|0.23,0.33,0.48,0.26,0.89,0.38,0.22,0.38 486.875 0.138
+∨R1,∨L,→R,∧R,→L,∧L1,∨R2,∧L2|0.39,0.35,0.22,0.54,0.67,0.21,0.60,0.24 536.889 0.105
+∧L1,→L,→R,∧L2,∨R2,∨R1,∨L,∧R|0.27,0.78,0.52,0.26,0.44,0.47,0.46,0.36 547.333 0.164
+∨L,→R,∧L1,∧L2,→L,∨R1,∧R,∨R2|0.38,0.59,0.03,0.13,0.15,0.49,0.69,0.08 548.750 0.164
+∧R,→R,∨R2,∧L1,∧L2,∨L,→L,∨R1|0.67,0.05,0.66,0.49,0.49,0.71,0.23,0.10 581.143 0.099
+→R,∧L2,∧R,∨R2,→L,∨L,∧L1,∨R1|0.62,0.48,0.78,0.86,0.48,0.92,0.52,0.34 644.417 0.059
+→L,→R,∨R1,∧R,∨R2,∧L1,∨L,∧L2|0.31,0.41,0.77,0.74,0.88,0.39,0.46,0.35 654.455 0.105
+∨L,→L,∨R2,→R,∨R1,∧R,∧L2,∧L1|0.09,0.48,0.04,0.85,0.69,0.46,0.17,0.18 1408.778 0.099
+
+=============================
+
+THOUGHT: Might it be worth trying with the constraint that the weights for ^L1
+and ^L2 and the weights for vR1 and vR2 are kept the same, because they really
+shouldn't vary and it's just more work for the algorithm?

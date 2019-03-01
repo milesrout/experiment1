@@ -4,6 +4,7 @@ import functools
 import random
 import signal
 import threading
+import time
 
 
 class TimeLimit(BaseException):
@@ -22,7 +23,20 @@ def timelimit(limit=1):
     signal.signal(signal.SIGINT, h)
 
 
+@contextlib.contextmanager
+def timelimit_soft(limit=1):
+    global start_time
+    start_time = time.perf_counter() + (limit / 1000)
+    yield
+
+
+def check_timelimit():
+    if time.perf_counter() > start_time:
+        raise TimeLimit
+
+
 def frozen(x):
+    return x
     a, b = x
     if isinstance(b, list):
         b = tuple(b)

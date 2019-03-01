@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 
+from abc import ABC, abstractmethod
 import argparse
 import collections
 import itertools
+import math
 import pickle
 import random
 import statistics
 import sys
+import time
 import unicodedata
 
 from formula import atomic, bot, impl, conj, disj
 import rand
 import sat
 import stats
-from utils import TimeLimit, timelimit, memoise, compose
+from utils import compose, TimeLimit, timelimit_soft, check_timelimit
 
 # If this parameter is False, formulae are removed from premises when they are
 # used. Oddly this doesn't seem to reduce the number of formulae that are
-# provable.
+# provable if the only connective used is implication.
 KEEP_USED_PREMISES = True
 
 # Whether to print out the steps while backtracking/proving
@@ -33,6 +36,9 @@ IMPL = unicodedata.lookup('RIGHTWARDS ARROW')
 CONJ = '∧'
 DISJ = '∨'
 TSTILE = unicodedata.lookup('RIGHT TACK')
+
+P_ONEPOINT = 0.3
+P_MUTATION = 0.05
 
 
 # Returns a copy of the original list in a random order
@@ -95,52 +101,36 @@ def disj_right_2(premises, goal):
     return ByDisjRight2, [(premises, goal.b)]
 
 
-def simplistic_weight(opt):
-    "An extremely simple heuristic - always favour the options in this order"
+class Heuristic(ABC):
+    @abstractmethod
+    def weight(self, option):
+        ...
 
-    options = [
-        ByImplLeft,
-        ByConjRight,
-        ByDisjLeft,
-        ByConjLeft1,
-        ByConjLeft2,
-        ByDisjRight1,
-        ByDisjRight2,
-        ByImplRight
-    ]
-    return options.index(opt[0])
+    def choose_options(self, sequent):
+        (premises, goal) = sequent
 
+        # work out all the options
+        options = options_right(premises, goal)
+        for premise in sorted(premises, key=str):
+            for option in options_left(premise, premises, goal):
+                options.append(option)
 
-@memoise
-def consistent_key_option(option):
-    return (option[0].__name__ + '!!' +
-            '!'.join(consistent_key_branch(b)
-                     for b in sorted(option[1], key=consistent_key_branch)))
+        # choose the order of them - THIS is the key part, the heuristic!
+        options.sort(key=self.weight)
+
+        return options
 
 
-@memoise
-def consistent_key_branch(branch):
-    return (str(branch[1]) + '??' +
-            '?'.join(str(x) for x in sorted(branch[0], key=str)))
+class SimplisticHeuristic(Heuristic):
+    def __init__(self, *, reverse=False):
+        self.reverse = reverse
 
+    def weight(self, opt):
+        "An extremely simple heuristic: always favour options in this order"
 
-def choose_options(stmt, weight):
-    (premises, goal) = stmt
-
-    # work out all the options
-    options = options_right(premises, goal)
-
-    for premise in sorted(premises, key=lambda x: consistent_key_branch(({x}, 'a'))):
-        for option in options_left(premise, premises, goal):
-            options.append(option)
-
-    # ensure the options are in a consistent (but arbitrary) order
-    options.sort(key=consistent_key_option)
-
-    # choose the order of them - THIS is the key part, the heuristic!
-    options.sort(key=weight)
-
-    return options
+        if self.reverse:
+            return 1 / (1 + RULES.index(opt[0]))
+        return RULES.index(opt[0])
 
 
 def options_right(premises, goal):
@@ -220,7 +210,7 @@ class Proof:
     @classmethod
     def fmtsequent(cls, seq):
         premises, goal = seq
-        ps = ', '.join(str(p) for p in sorted(premises, key=str))
+        ps = ', '.join(str(p) for p in premises)
         return f'{ps} {TSTILE} {goal}'
 
 
@@ -282,56 +272,70 @@ class ByAxiom(NullaryProof):
         return 1
 
 
-def unaryrule(symbol1, symbol2):
+def unaryrule(symbol1, symbol2, num=None):
+    if num is None:
+        num = ''
+    else:
+        num = str(num)
+    abbrev = globals()[symbol1] + symbol2[0] + num
+
     class Rule(UnaryProof):
         def __str__(self):
-            return self.fmtunary(globals()[symbol1] + symbol2[0])
-    Rule.__name__ = f'By{symbol1.title()}{symbol2.title()}'
-    Rule.__qualname__ = f'unaryrule.<locals>.{Rule.__name__}'
+            return self.fmtunary(abbrev)
+    Rule.__name__ = f'By{symbol1.title()}{symbol2.title()}{num}'
+    Rule.__qualname__ = f'unaryrule.<locals>.{Rule.__name__}{num}'
+    Rule.abbrev = abbrev
     return Rule
 
 
 def binaryrule(symbol1, symbol2):
+    abbrev = globals()[symbol1] + symbol2[0]
+
     class Rule(BinaryProof):
         def __str__(self):
-            return self.fmtbinary(globals()[symbol1] + symbol2[0])
+            return self.fmtbinary(abbrev)
     Rule.__name__ = f'By{symbol1.title()}{symbol2.title()}'
     Rule.__qualname__ = f'binaryrule.<locals>.{Rule.__name__}'
+    Rule.abbrev = abbrev
     return Rule
 
 
 ByConjRight = binaryrule('CONJ', 'RIGHT')
-ByConjLeft1 = unaryrule('CONJ', 'LEFT')
-ByConjLeft2 = unaryrule('CONJ', 'LEFT')
+ByConjLeft1 = unaryrule('CONJ', 'LEFT', 1)
+ByConjLeft2 = unaryrule('CONJ', 'LEFT', 2)
 
 ByImplLeft = binaryrule('IMPL', 'LEFT')
 ByImplRight = unaryrule('IMPL', 'RIGHT')
 
 ByDisjLeft = binaryrule('DISJ', 'LEFT')
-ByDisjRight1 = unaryrule('DISJ', 'RIGHT')
-ByDisjRight2 = unaryrule('DISJ', 'RIGHT')
+ByDisjRight1 = unaryrule('DISJ', 'RIGHT', 1)
+ByDisjRight2 = unaryrule('DISJ', 'RIGHT', 2)
+
+RULES = [
+    ByImplLeft,
+    ByConjRight,
+    ByDisjLeft,
+    ByConjLeft1,
+    ByConjLeft2,
+    ByDisjRight1,
+    ByDisjRight2,
+    ByImplRight
+]
 
 
 class Prover:
     def __init__(self, restrict_axiom, heuristic):
         self.restrict_axiom = restrict_axiom
         self.heuristic = heuristic
-        self.inprogress = collections.ChainMap({})
+        self.inprogress = []
         self.proved = {}
-        self.failed = set()
-
-    def bookmark(self):
-        self.inprogress = self.inprogress.new_child()
+        self.failed = []
 
     def isproved(self, sequent):
         return sequent in self.proved
 
     def isinprogress(self, sequent):
-        p0, g0 = sequent
-        for p, g in self.inprogress:
-            if g0 == g and p0 <= p:
-                return True
-        return False
+        return sequent in self.inprogress
 
     def hasfailed(self, sequent):
         return sequent in self.failed
@@ -340,25 +344,21 @@ class Prover:
         return self.proved[sequent]
 
     def markinprogress(self, sequent):
-        # using only the 'set' part of the ChainMap, the values don't matter
-        self.inprogress[sequent] = None
+        self.inprogress.append(sequent)
 
     def markproved(self, sequent, proof):
         self.proved[sequent] = proof
 
     def markfailed(self, sequent):
-        print('FAILED:', Proof.fmtsequent(sequent))
-        self.failed.add(sequent)
+        self.failed.append(sequent)
 
     def backtrack(self):
-        self.inprogress = self.inprogress.parents
-
-    def print_failed(self):
-        print('FAILURES:')
-        for seq in self.failed:
-            print(Proof.fmtsequent(seq))
+        self.inprogress.pop()
 
     def do_prove(self, sequent):
+        self.search_size += 1
+        check_timelimit()
+
         premises, goal = sequent
 
         # We can restrict the A |- A rule to only atomic formulas. Every proof
@@ -389,10 +389,9 @@ class Prover:
                       Proof.fmtsequent(sequent))
             raise LoopBacktrack
 
-        self.bookmark()
         try:
             self.markinprogress(sequent)
-            options = choose_options(sequent, self.heuristic)
+            options = self.heuristic.choose_options(sequent)
 
             fail_backtrack = False
             for option in options:
@@ -408,30 +407,26 @@ class Prover:
                     for stmt in stmts:
                         results.append(self.do_prove(stmt))
                 except LoopBacktrack:
-                    if DEBUG_PROOF_STEPS:
-                        print(' ' * len(self.inprogress) + '<==')
-
-                    # Stop backtracking, because we're at a point where we can
-                    # make a different decision
-                    continue
+                    pass
                 except FailBacktrack:
                     fail_backtrack = True
-                    if DEBUG_PROOF_STEPS:
-                        print(' ' * len(self.inprogress) + '<==')
+                else:
+                    proof = name(sequent, *results)
 
-                    # Stop backtracking, because we're at a point where we can
-                    # make a different decision
-                    continue
+                    # Memoise proofs
+                    self.markproved(sequent, proof)
 
-                proof = name(sequent, *results)
+                    # The current sequent is no longer in progress (proved it)
+                    self.backtrack()
 
-                # Memoise proofs
-                self.markproved(sequent, proof)
+                    return proof
 
-                # The current sequent is no longer in progress (we proved it)
-                self.backtrack()
+                if DEBUG_PROOF_STEPS:
+                    print(' ' * len(self.inprogress) + '<==')
 
-                return proof
+                # Stop backtracking, because we're at a point where we can
+                # make a different decision
+                continue
 
             # We ran out of options - backtrack
             if fail_backtrack:
@@ -445,22 +440,29 @@ class Prover:
         raise RuntimeError('Should never get here')
 
     def prove(self, statement):
+        self.search_size = 0
         try:
-            return self.do_prove(freeze(statement))
+            proof = self.do_prove(freeze(statement))
         except (FailBacktrack, LoopBacktrack):
-            return None
+            proof = None
+        #return len(self.proved) + len(self.failed), proof
+        return self.search_size, proof
 
 
-def evaluate(restrict_axiom, heuristic, implications):
+def evaluate(implications, restrict_axiom, time_limit, heuristic, verbose):
     successes = 0
     timeouts = 0
     total = 0
     sizes = []
+    search_space_explored = []
+    proofs = []
     for statement in implications:
         try:
-            # with timelimit(500):
+            with timelimit_soft(time_limit):
                 prover = Prover(restrict_axiom, heuristic)
                 proof = prover.prove(statement)
+                if proof is not None:
+                    search_size, proof = proof
         except TimeLimit:
             # print('TIMED OUT')
             timeouts += 1
@@ -477,15 +479,21 @@ def evaluate(restrict_axiom, heuristic, implications):
                 print()
             successes += 1
             sizes.append(proof.size)
+            search_space_explored.append(search_size)
             if len(implications) < 40:
                 if proof.size > 10000:
                     print(proof.size, Proof.fmtsequent(statement))
+            proofs.append((statement, proof))
         else:
             if len(implications) < 40:
                 print('not minimally provable:')
                 print(Proof.fmtsequent(statement))
         total += 1
 
+    return proofs, sizes, search_space_explored, total, successes, timeouts
+
+
+def print_stats(proofs, sizes, search_sizes, total, successes, timeouts):
     print(f'Successes: {successes}/{total}: {int(100 * (successes / total))}%')
     print(f'Timeouts: {timeouts}/{total}: {int(100 * (timeouts / total))}%')
 
@@ -511,7 +519,7 @@ def evaluate(restrict_axiom, heuristic, implications):
         print(f'skewness: {skewness}')
         print(f'variance: {variance}')
         print(f'excess kurtosis: {excess_kurtosis}')
-    return total / len(implications)
+    return successes / len(implications)
 
 
 pA = atomic('A')
@@ -580,6 +588,137 @@ implications = [
 ]
 
 
+class WeightedHeuristic(Heuristic):
+    def __init__(self, weights):
+        self.weights = weights
+
+    @staticmethod
+    def random():
+        return WeightedHeuristic([random.random() for i in range(len(RULES))])
+
+    def __repr__(self):
+        rules = self.rules()
+        return (','.join(rule.abbrev for rule in rules) + '|' +
+                ','.join(f'{W:.2f}' for W in self.weights))
+
+    def rules(self):
+        return sorted(RULES, key=lambda x: self.weight((x, None)))
+
+    def nearby(self, x, a=0, b=1, alpha=20):
+        """Returns a value near x within the range [a,b]
+
+        alpha - higher means nearer x
+        """
+        v = (x - a) / (b - a)
+        if v == 1:
+            return v
+        return a + (b - a) * random.betavariate(alpha, alpha * ((1 / v) - 1))
+
+    def weight(self, option):
+        return self.weights[RULES.index(option[0])]
+
+    def crossover(self, other):
+        w = list(map(random.uniform, self.weights, other.weights))
+        return WeightedHeuristic(w)
+
+    def mutate(self):
+        if random.random() < P_ONEPOINT:
+            if random.random() < P_ONEPOINT:
+                print('reset')
+                return WeightedHeuristic.random()
+            # Mutate a single weight
+            w = self.weights[:]
+            w[random.randint(0, len(w) - 1)] = random.random()
+        else:
+            # Change all the weights slightly
+            w = [self.nearby(x) for x in self.weights]
+        return WeightedHeuristic(w)
+
+
+def similarity(h1, h2):
+    """Return the similarity between two WeightedHeuristics"""
+    return sum(x == y for x, y in zip(h1.rules(), h2.rules())) / len(RULES)
+
+
+def all_similarity(h0, hs):
+    """Return the average similarity between a heuristic and a list of heuristics"""
+    return statistics.mean((similarity(h0, h) for h in hs))
+
+
+def use_data(data):
+    """Helper function for argument handling cleanly"""
+    return lambda: data
+
+
+def use_random_statements(args):
+    """Helper function for argument handling cleanly"""
+    if args.num_connectives == 1:
+        conns = [impl]
+    elif args.num_connectives == 3:
+        conns = [impl, conj, disj]
+    return lambda: random_statements(args.allow_dups, args.max_depth,
+                                     conns, args.num_stmts)
+
+
+def evolve_main(args):
+    if args.input is not None:
+        with args.input as f:
+            generate_data = use_data(pickle.load(f))
+    else:
+        generate_data = use_random_statements(args)
+
+    population = [WeightedHeuristic.random() for i in range(args.pop_size)]
+    new_population = []
+
+    # basically is 'for generation in range(1, inf):'
+    for generation in itertools.count(1):
+        print(f'Generation {generation}')
+        formulae = generate_data()
+
+        # This is probably the worst possible way of doing it
+        for h in population:
+            new_population.append(h)
+            new_population.append(h.crossover(random.choice(population)))
+        for i, h in enumerate(population):
+            if random.random() < P_MUTATION:
+                new_population[i] = new_population[i].mutate()
+
+        # Swap
+        population, new_population = new_population, []
+
+        fitness = {}
+        for h in population:
+            # before_time = time.perf_counter()
+            proofs, sizes, search_sizes, total, successes, timeouts = evaluate(
+                formulae, args.restrict_axiom, args.time_limit, h, False)
+            # fitness[h] = time.perf_counter() - before_time
+            # fitness[h] = (1 - successes / total)
+            fitness[h] = statistics.mean(search_sizes)
+
+        # Calculate the similarity between each heuristic and each other heuristic
+        population = [(h, all_similarity(h, population[:i] + population[i + 1:]))
+                      for i, h in enumerate(population)]
+
+        # Use fitness function to encourage diversity (bad results)
+        # for (h, sim) in population:
+        #     fitness[h] *= math.sqrt(sim)
+
+        # Sort the population by fitness and then by similarity
+        population.sort(key=lambda x: (fitness[x[0]], x[1]))
+
+        # Print out the population: columns INDIVIDUAL, FITNESS, SIMILARITY
+        for i, (k, sim) in enumerate(population):
+            print(f'{k} {fitness[k]:.3f} {sim:.3f}')
+            # Anything below the line gets cut off
+            if i == args.pop_size - 1:
+                print('-----')
+
+        # Cut off the population (MINIMISING fitness function)
+        population = [x for (x, s) in population][:args.pop_size]
+
+        print()
+
+
 def random_statements(allow_dups, max_depth, connectives, num_stmts=None):
     base_formulae = [pA, pB, pC, ~pA, ~pB, ~pC]
     if num_stmts is None:
@@ -593,36 +732,87 @@ def random_statements(allow_dups, max_depth, connectives, num_stmts=None):
                                                 connectives)
         if sat.tautological(formula):
             stmts.append((frozenset(), formula))
-    print(f'generated {num_stmts} statements')
     return list(stmts)
 
 
 def generate_main(args):
-    if args.connectives == 1:
+    if args.num_connectives == 1:
         conns = [impl]
-    elif args.connectives == 3:
+    elif args.num_connectives == 3:
         conns = [impl, conj, disj]
     else:
         raise NotImplementedError
+
     stmts = random_statements(args.allow_dups, args.max_depth,
-                              conns, args.statements)
+                              conns, args.num_stmts)
+
     pickle.dump(stmts, args.output)
 
 
 def stats_main(args):
     global DEBUG_PROOF_STEPS
+
     if args.debug:
         DEBUG_PROOF_STEPS = True
+
     if args.use_fixed:
         data = implications
     else:
         with args.input as f:
             data = pickle.load(f)
+
     if args.reverse:
-        heuristic = simplistic_weight
+        heuristic = SimplisticHeuristic(reverse=True)
     else:
-        heuristic = lambda x: 1 / (1 + simplistic_weight(x))
-    evaluate(args.restrict_axiom, heuristic, data)
+        heuristic = SimplisticHeuristic()
+
+    # don't print out info about each statement if dealing with lots of them
+    verbose = len(data) < 40
+
+    stats = evaluate(data, args.restrict_axiom, args.time_limit,
+                     heuristic, verbose)
+    print_stats(*stats)
+
+
+def add_input_arguments(parser):
+    parser.add_argument(
+        '--input', metavar='FILE', type=argparse.FileType('rb'), default=None,
+        help='A file containing a list of formulae')
+    add_generation_arguments(parser)
+
+
+def add_generation_arguments(parser):
+    group = parser.add_argument_group('generation arguments '
+                                      '(mutually exclusive with --input)')
+    group.add_argument(
+        '--allow-dups', action='store_true', default=False,
+        help='Whether to allow formulae like ((a -> a) -> b) and '
+             '((a -> b) -> (a -> b))')
+    group.add_argument(
+        '--max-depth', type=int, default=3,
+        help='The maximum depth of a generated formula')
+    group.add_argument(
+        '--num-connectives', type=int, default=1,
+        help='The number of connectives to use (1 = impl, 3 = impl/conj/disj)')
+    group.add_argument(
+        '--num-stmts', type=int, default=1000,
+        help='The number of statements to generate')
+
+
+def add_prover_arguments(parser):
+    group = parser.add_argument_group('prover arguments')
+    group.add_argument(
+        '--use-fixed', action='store_true', default=False,
+        help='Use a fixed set of formulae instead of formulae from a file')
+    group.add_argument(
+        '--restrict-axiom', action='store_true', default=False,
+        help='Whether to restrict the axiom rule to just atomic formulae')
+    group.add_argument(
+        '--debug', action='store_true', default=False,
+        help='Debug the proof steps')
+    group.add_argument(
+        '--time-limit', type=float, default=1.0,
+        help='Time limit per proof (in milliseconds)')
 
 
 # The code inside this if statement runs if you run this file directly, but not
@@ -638,46 +828,41 @@ if __name__ == '__main__':
     parser_stats = subparsers.add_parser(
         'stats', aliases=['s', 'stat'],
         help='Determine some statistics about the formulae')
-    parser_stats.add_argument(
-        '--input', metavar='FILE', type=argparse.FileType('rb'),
-        help='A file containing a list of formulae')
-    parser_stats.add_argument(
-        '--use-fixed', action='store_true', default=False,
-        help='Use a fixed set of formulae instead of formulae from a file')
-    parser_stats.add_argument(
-        '--restrict-axiom', action='store_true', default=False,
-        help='Whether to restrict the axiom rule to just atomic formulae')
-    parser_stats.add_argument(
-        '--debug', action='store_true', default=False,
-        help='Debug the proof steps')
-    parser_stats.add_argument(
-        '--reverse', action='store_true', default=False,
-        help='Reverse the heuristic')
-
     parser_stats.set_defaults(main=stats_main)
+    add_prover_arguments(parser_stats)
+    add_input_arguments(parser_stats)
+    heuristic_mutex = parser_stats.add_mutually_exclusive_group()
+    heuristic_mutex.add_argument(
+        '--heuristic-file', metavar='FILE', type=argparse.FileType('rb'),
+        help='The file to load the heuristic from')
+    heuristic_mutex.add_argument(
+        '--reverse', action='store_true', default=False,
+        help='Reverse the simplistic heuristic')
 
     parser_generate = subparsers.add_parser(
         'generate', aliases=['g', 'gen'],
         help='Generate and store a list of formulae')
+    parser_generate.set_defaults(main=generate_main)
     parser_generate.add_argument(
         '--output', metavar='FILE', type=argparse.FileType('wb'),
         help='Where to put the generated formulae')
-    parser_generate.add_argument(
-        '--allow-dups', action='store_true', default=False,
-        help='Whether to allow formulae like ((a -> a) -> b) and '
-             '((a -> b) -> (a -> b))')
-    parser_generate.add_argument(
-        '--max-depth', type=int, required=True,
-        help='The maximum depth of a generated formula')
-    parser_generate.add_argument(
-        '--connectives', type=int, default=1,
-        help='The number of connectives to use (1 = impl, 3 = impl/conj/disj)')
-    parser_generate.add_argument(
-        '--statements', type=int,
-        help='The number of statements to generate')
-    parser_generate.set_defaults(main=generate_main)
+    add_generation_arguments(parser_generate)
+
+    parser_evolve = subparsers.add_parser(
+        'evolve', aliases=['e'],
+        help='Evolve a simple weighted heuristic')
+    parser_evolve.set_defaults(main=evolve_main)
+    parser_evolve.add_argument(
+        '--output', metavar='FILE', type=argparse.FileType('wb'),
+        help='Where to put checkpoints')
+    parser_evolve.add_argument(
+        '--pop-size', type=int,
+        help='Population size')
+    add_input_arguments(parser_evolve)
+    add_prover_arguments(parser_evolve)
 
     args = parser.parse_args()
+
     if hasattr(args, 'main') and args.main is not None:
         args.main(args)
     else:
