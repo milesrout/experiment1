@@ -17,7 +17,14 @@ Run:
     # To attempt to prove some formulae and give stats about the size of those proofs
     ./exp2.py stats --input formulae.bin
 
-Example:
+    # To attempt to evolve a heuristic
+    # This example will take a  VERY LONG  time for each generation!
+    ./exp2.py evolve --pop-size 100 --num-connectives 3 --num-stmts 1000 --max-depth 5
+
+    # To attempt to evolve a heuristic (more quickly, but not very good)
+    ./exp2.py evolve --pop-size 50 --num-connectives 3 --num-stmts 40 --max-depth 4
+
+Example (using old simplistic heuristic, not evolved ones):
 
     $ ./exp2.py generate --output formulae.bin --max-depth 5 --connectives 1
     generated 10000 statements
