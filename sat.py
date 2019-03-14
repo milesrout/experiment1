@@ -4,7 +4,7 @@ import utils
 
 
 def assignments(f):
-    ps = props(f) - {formula.bot.a}
+    ps = props(f) - {formula.bot.psym.name}
     cs = itertools.product({True, False}, repeat=len(ps))
     return (dict(zip(ps, c)) for c in cs)
 
@@ -39,11 +39,11 @@ def sat_disj(f, a):
     return sat(f.a, a) or sat(f.b, a)
 
 
-@sat.on(formula.atomic)
+@sat.on(formula.Atomic)
 def sat_atomic(f, a):
     if f is formula.bot:
         return False
-    return a[f.a]
+    return a[f.psym.name]
 
 
 @utils.overload()
@@ -66,9 +66,9 @@ def props_disj(f):
     return props(f.a) | props(f.b)
 
 
-@props.on(formula.atomic)
+@props.on(formula.Atomic)
 def props_atomic(f):
-    return {f.a}
+    return {f.psym.name}
 
 
 if __name__ == '__main__':

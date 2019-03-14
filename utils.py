@@ -45,6 +45,18 @@ def frozen(x):
     return a, b
 
 
+def memoisemethod(f):
+    @functools.wraps(f)
+    def wrapper(self, o):
+        if not hasattr(self, '_memory'):
+            setattr(self, '_memory', {})
+        memory = self._memory[f] = self._memory.get(f, {})
+        if frozen(o) not in memory:
+            memory[frozen(o)] = f(self, o)
+        return memory[frozen(o)]
+    return wrapper
+
+
 def memoise(f):
     memory = {}
 
