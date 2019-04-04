@@ -26,11 +26,16 @@ def timelimit(limit=1):
 @contextlib.contextmanager
 def timelimit_soft(limit=1):
     global start_time
-    start_time = time.perf_counter() + (limit / 1000)
+    if limit == 0:
+        start_time = None
+    else:
+        start_time = time.perf_counter() + (limit / 1000)
     yield
 
 
 def check_timelimit():
+    if start_time is None:
+        return
     if time.perf_counter() > start_time:
         raise TimeLimit
 

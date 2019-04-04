@@ -3,14 +3,17 @@
 from abc import ABC, abstractmethod
 import argparse
 import collections
+import math
 import itertools
 import pickle
 import random
 import statistics
 import sys
+import time
 import unicodedata
 
-from formula import atomic, bot, impl, conj, disj, forall, exists, proposition, variable, equality, zero, succ
+from formula import atomic, bot, impl, conj, disj, forall, exists, proposition
+from formula import variable, equality, zero, succ, predicate_symbol
 from randfol import FormulaGenerator, generate_formulas
 import stats
 from utils import compose, TimeLimit, timelimit_soft, check_timelimit
@@ -30,15 +33,16 @@ PHI = unicodedata.lookup('GREEK SMALL LETTER PHI')
 THETA = unicodedata.lookup('GREEK SMALL LETTER THETA')
 PSI = unicodedata.lookup('GREEK SMALL LETTER PSI')
 IMPL = unicodedata.lookup('RIGHTWARDS ARROW')
+TSTILE = unicodedata.lookup('RIGHT TACK')
 CONJ = '∧'
 DISJ = '∨'
-TSTILE = unicodedata.lookup('RIGHT TACK')
 FORALL = '∀'
 EXISTS = '∃'
 EQUALITY = '='
+INDUCTION = 'n'
 
 P_ONEPOINT = 0.3
-P_MUTATION = 0.05
+P_MUTATION = 0.2
 
 # Returns a copy of the original list in a random order
 def shuffled(pop):
@@ -53,61 +57,80 @@ def take(n, iterable):
 # is no need for the structural rules of Contraction, Weakening,
 # or Permutation.
 
+def random_number_of_terms():
+    x = math.floor(abs(random.normalvariate(0.0, 5.0)))
+    print('x', x)
+    input()
+    return x
+
 def iterate(f, x):
     yield x
     yield from map(f, iterate(f, x))
 
-def terms():
-    x, y, z = variable('x'), variable('y'), zero
-    while True:
-        yield x
-        yield y
-        yield z
-        x, y, z = succ(x), succ(y), succ(z)
+def terms(premises, goal):
+    fvs = set.union(*[x.free_vars() for x in premises | {goal}])
+    ground_terms = [variable('x'), variable('y'), zero] + list(fvs)
+    return inductive_terms(ground_terms)
+
+def inductive_terms(ground_terms):
+    yield from ground_terms
+    yield from map(succ, inductive_terms(ground_terms))
+
+for x in list(take(21, inductive_terms([variable('x'), variable('y'), zero]))):
+    print(x)
 
 def fresh(premises, goal):
-    vs = (variable(f'x{i}') for i in itertools.count(0))
+    vs = itertools.chain(map(variable, ('a', 'b', 'c')), (variable(f'x{i}') for i in itertools.count(0)))
     FV = set.union(goal.free_vars(), *[p.free_vars() for p in premises])
     return next(v for v in vs if v not in FV)
 
 def equality_right(premises, goal):
-    return ByEqualityRight, [(premises, goal)]
+    return ByEqualityRight, []
 
 def equality_left_1(premise, premises, goal):
-    return [(ByEqualityLeft1, [(premises | {p.subst(premise.t1, premise.t2)}, goal)])
-            for p in premises]
+    return ByEqualityLeft1, [(frozenset(p.subst(premise.t1, premise.t2) for p in premises), goal)]
 
 def equality_left_2(premise, premises, goal):
-    return [(ByEqualityLeft2, [(premises | {p.subst(premise.t2, premise.t1)}, goal)])
-            for p in premises]
+    return ByEqualityLeft2, [(frozenset(p.subst(premise.t2, premise.t1) for p in premises), goal)]
 
 def exists_right(premises, goal):
-    ts = take(3, terms())
+    ts = take(random_number_of_terms(), terms(premises, goal))
     return [(ByExistsRight, [(premises, goal.instantiate(t))]) for t in ts]
 
 def forall_right(premises, goal):
     return ByForallRight, [(premises, goal.instantiate(fresh(premises, goal)))]
 
+def induction_right(premises, goal):
+    fv = fresh(premises, goal)
+    return ByInduction, [(premises, goal.instantiate(zero)),
+                         (premises, goal.instantiate(fv) > goal.instantiate(succ(fv)))]
+
 def exists_left(premise, premises, goal):
     if KEEP_USED_PREMISES:
         return ByExistsLeft, [((premises | {premise.instantiate(fresh(premises, goal))}), goal)]
     else:
-        raise NotImplementedError()
+        return ByExistsLeft, [((premises - {premise} | {premise.instantiate(fresh(premises, goal))}), goal)]
 
 def forall_left(premise, premises, goal):
-    ts = take(3, terms())
+    ts = take(random_number_of_terms(), terms(premises, goal))
     if KEEP_USED_PREMISES:
         return [(ByForallLeft, [(premises | {premise.instantiate(t)}, goal)]) for t in ts]
     else:
-        raise NotImplementedError()
+        return [(ByForallLeft, [(premises - {premise} | {premise.instantiate(t)}, goal)]) for t in ts]
 
 def impl_left(premise, premises, goal):
     if KEEP_USED_PREMISES:
-        return ByImplLeft, [(premises, premise.a),
-                            (premises | {premise.b}, goal)]
+        ps = premises - {premise}
     else:
-        return ByImplLeft, [(premises - {premise}, premise.a),
-                            (premises - {premise} | {premise.b}, goal)]
+        ps = premises
+    if premise.a in premises and premise.b is goal:
+        return ByImplLeft4, []
+    elif premise.b in goal:
+        return ByImplLeft3, [(ps, premise.a)]
+    elif premise.a in premises:
+        return ByImplLeft2, [(ps | {premise.b}, goal)]
+    else:
+        return ByImplLeft1, [(ps, premise.a), (ps | {premise.b}, goal)]
 
 
 def conj_left_1(premise, premises, goal):
@@ -181,7 +204,6 @@ class SimplisticHeuristic(Heuristic):
             return 1 / (1 + RULES.index(opt[0]))
         return RULES.index(opt[0])
 
-
 def options_right(premises, goal):
     """All the possible next steps from the goal"""
     if isinstance(goal, impl):
@@ -194,16 +216,12 @@ def options_right(premises, goal):
     if isinstance(goal, exists):
         return exists_right(premises, goal)
     if isinstance(goal, forall):
-        return [forall_right(premises, goal)]
+        return [forall_right(premises, goal),
+                induction_right(premises, goal)]
     if isinstance(goal, equality):
-        print(goal.t1, goal.t2, goal.t1 == goal.t2)
         if goal.t1 == goal.t2:
             return [equality_right(premises, goal)]
         return [(ByEqualityFlip, [(premises, equality(goal.t2, goal.t1))])]
-    #print('--------------------------------')
-    #for premise in premises:
-    #    print(f'    pre: {str(type(premise)) + ":":<35} {str(premise):<15}')
-    #print(f'goal:    {str(type(goal)) + ":":<35} {str(goal):<15}')
     return []
 
 
@@ -222,19 +240,14 @@ def options_left(premise, premises, goal):
         return forall_left(premise, premises, goal)
     if isinstance(premise, equality):
         if isinstance(premise.t1, variable) and isinstance(premise.t2, variable):
-            return (equality_left_1(premise, premises, goal) +
-                    equality_left_2(premise, premises, goal))
+            return [equality_left_1(premise, premises, goal),
+                    equality_left_2(premise, premises, goal)]
         elif isinstance(premise.t1, variable):
-            return equality_left_1(premise, premises, goal)
+            return [equality_left_1(premise, premises, goal)]
         elif isinstance(premise.t2, variable):
-            return equality_left_2(premise, premises, goal)
+            return [equality_left_2(premise, premises, goal)]
         else:
             return []
-    #print('--------------------------------')
-    #for premise in premises:
-    #    print(f'    pre: {str(type(premise)) + ":":<35} {str(premise):<15}')
-    #print(f'goal:    {str(type(goal)) + ":":<35} {str(goal):<15}')
-    #print(f'premise: {str(type(premise)) + ":":<35} {str(premise):<15}')
     return []
 
 
@@ -300,6 +313,15 @@ class NullaryProof(Proof):
     def __init__(self, result):
         self.result = result
 
+    def fmtnullary(self, op):
+        seq = self.fmtsequent(self.result)
+        divider = '-' * len(seq)
+        return f'{seq}   \n{divider} {op}'
+
+    @property
+    def size(self):
+        return 1
+
 
 class UnaryProof(Proof):
     """A proof with one further step required"""
@@ -343,7 +365,10 @@ class BinaryProof(Proof):
 
 
 class ByAxiom(NullaryProof):
+    abbrev = 'Ax'
+
     def __str__(self):
+        return self.fmtnullary(self.abbrev)
         seq = self.fmtsequent(self.result)
         divider = '-' * len(seq)
         return f'{seq}   \n{divider} Ax'
@@ -354,7 +379,10 @@ class ByAxiom(NullaryProof):
 
 
 class ByEqualityRight(NullaryProof):
+    abbrev = '=R'
+
     def __str__(self):
+        return self.fmtnullary(self.abbrev)
         seq = self.fmtsequent(self.result)
         divider = '-' * len(seq)
         return f'{seq}   \n{divider} Ax'
@@ -362,6 +390,22 @@ class ByEqualityRight(NullaryProof):
     @property
     def size(self):
         return 1
+
+
+def nullaryrule(symbol1, symbol2, num=None):
+    if num is None:
+        num = ''
+    else:
+        num = str(num)
+    abbrev = globals()[symbol1] + symbol2[0] + num
+
+    class Rule(NullaryProof):
+        def __str__(self):
+            return self.fmtnullary(abbrev)
+    Rule.__name__ = f'By{symbol1.title()}{symbol2.title()}{num}'
+    Rule.__qualname__ = f'unaryrule.<locals>.{Rule.__name__}{num}'
+    Rule.abbrev = abbrev
+    return Rule
 
 
 def unaryrule(symbol1, symbol2, num=None):
@@ -380,14 +424,18 @@ def unaryrule(symbol1, symbol2, num=None):
     return Rule
 
 
-def binaryrule(symbol1, symbol2):
-    abbrev = globals()[symbol1] + symbol2[0]
+def binaryrule(symbol1, symbol2, num=None):
+    if num is None:
+        num = ''
+    else:
+        num = str(num)
+    abbrev = globals()[symbol1] + symbol2[0] + num
 
     class Rule(BinaryProof):
         def __str__(self):
             return self.fmtbinary(abbrev)
-    Rule.__name__ = f'By{symbol1.title()}{symbol2.title()}'
-    Rule.__qualname__ = f'binaryrule.<locals>.{Rule.__name__}'
+    Rule.__name__ = f'By{symbol1.title()}{symbol2.title()}{num}'
+    Rule.__qualname__ = f'binaryrule.<locals>.{Rule.__name__}{num}'
     Rule.abbrev = abbrev
     return Rule
 
@@ -396,7 +444,10 @@ ByConjRight = binaryrule('CONJ', 'RIGHT')
 ByConjLeft1 = unaryrule('CONJ', 'LEFT', 1)
 ByConjLeft2 = unaryrule('CONJ', 'LEFT', 2)
 
-ByImplLeft = binaryrule('IMPL', 'LEFT')
+ByImplLeft1 = binaryrule('IMPL', 'LEFT', 1)
+ByImplLeft2 = unaryrule('IMPL', 'LEFT', 2)
+ByImplLeft3 = unaryrule('IMPL', 'LEFT', 3)
+ByImplLeft4 = nullaryrule('IMPL', 'LEFT', 4)
 ByImplRight = unaryrule('IMPL', 'RIGHT')
 
 ByDisjLeft = binaryrule('DISJ', 'LEFT')
@@ -413,8 +464,16 @@ ByEqualityLeft1 = unaryrule('EQUALITY', 'LEFT', 1)
 ByEqualityLeft2 = unaryrule('EQUALITY', 'LEFT', 2)
 ByEqualityFlip = unaryrule('EQUALITY', 'FLIP')
 
+ByInduction = binaryrule('INDUCTION', 'INDUCTION')
+
 RULES = [
-    ByImplLeft,
+    ByImplLeft1,
+    ByImplLeft2,
+    ByImplLeft3,
+    ByImplLeft4,
+    ByExistsRight,
+    ByForallLeft,
+    ByExistsLeft,
     ByConjRight,
     ByDisjLeft,
     ByConjLeft1,
@@ -422,14 +481,12 @@ RULES = [
     ByDisjRight1,
     ByDisjRight2,
     ByImplRight,
-    ByForallLeft,
-    ByForallRight,
-    ByExistsLeft,
-    ByExistsRight,
     ByEqualityLeft1,
     ByEqualityLeft2,
     ByEqualityRight,
     ByEqualityFlip,
+    ByForallRight,
+    ByInduction,
 ]
 
 
@@ -468,7 +525,7 @@ class Prover:
 
     def do_prove(self, sequent):
         self.search_size += 1
-        #check_timelimit()
+        check_timelimit()
 
         premises, goal = sequent
 
@@ -587,9 +644,9 @@ def evaluate(implications, restrict_axiom, time_limit, heuristic, verbose):
             timeouts += 1
             proof = None
         if proof is not None:
-            if len(implications) <= 25:
+            if len(implications) <= 40:
                 proof_str = str(proof)
-                if width(proof_str) <= 120:
+                if width(proof_str) <= 200:
                     print(f'Proof of {Proof.fmtsequent(statement)}:')
                     print(proof_str)
                 else:
@@ -622,9 +679,9 @@ def print_stats(proofs, sizes, search_sizes, total, successes, timeouts):
     longest = max(sizes)
     shortest = min(sizes)
     # most_common = collections.Counter(sizes).most_common(1)[0][0]
-    for p in proofs:
-        print('=======')
-        print(p[1])
+    # for p in proofs:
+    #     print('=======')
+    #     print(p[1])
     skewness = stats.skewness(sizes, mean)
     variance = statistics.variance(sizes, mean)
     excess_kurtosis = stats.excess_kurtosis(sizes, mean)
@@ -668,7 +725,7 @@ lem = lambda pa: pa | ~pa
 wlem = lambda pa: ~pa | ~~pa
 
 
-implications = [
+prop_implications = [
     # Some things that definitely aren't provable in minimal logic
     (set(), dne(pA)),
     (set(), lem(pA)),
@@ -711,6 +768,29 @@ implications = [
     ({dgp(pA, pB)}, dgpa(pA, pB)),
 ]
 
+vX = variable('x')
+vY = variable('y')
+vZ = variable('z')
+pP = lambda x: atomic(predicate_symbol('P', 1), (x,))
+
+PEANO_ = set()
+PEANO = {
+    #forall(vX, forall(vY, equality(succ(vX), succ(vY)) > equality(vX, vY))),
+    forall(vX, equality(succ(vX), zero) > bot),
+}
+
+
+fol_implications = [
+    (PEANO | {forall(vX, pP(vX))}, ~(exists(vX, ~pP(vX)))),
+    (PEANO | {exists(vX, pP(vX))}, ~(forall(vX, ~pP(vX)))),
+    (PEANO | {forall(vX, ~pP(vX))}, ~(exists(vX, pP(vX)))),
+    (PEANO | {exists(vX, ~pP(vX))}, ~(forall(vX, pP(vX)))),
+    (PEANO | set(), equality(vX, vX)),
+    (PEANO | set(), forall(vX, forall(vY, equality(vX, vY) > equality(vY, vX)))),
+    (PEANO | set(), forall(vX, forall(vY, forall(vZ, (equality(vX, vY) & equality(vY, vZ)) > equality(vX, vZ))))),
+]
+
+implications = fol_implications
 
 class WeightedHeuristic(Heuristic):
     def __init__(self, weights):
@@ -785,7 +865,9 @@ def use_random_statements(args):
 
 
 def evolve_main(args):
-    if args.input is not None:
+    if args.use_fixed:
+        generate_data = lambda: implications
+    elif args.input is not None:
         with args.input as f:
             generate_data = use_data(pickle.load(f))
     else:
@@ -810,14 +892,16 @@ def evolve_main(args):
         # Swap
         population, new_population = new_population, []
 
+        stats = {}
         fitness = {}
         for h in population:
-            # before_time = time.perf_counter()
+            before_time = time.perf_counter()
             proofs, sizes, search_sizes, total, successes, timeouts = evaluate(
                 formulae, args.restrict_axiom, args.time_limit, h, False)
-            # fitness[h] = time.perf_counter() - before_time
-            # fitness[h] = (1 - successes / total)
-            fitness[h] = statistics.mean(search_sizes)
+            stats[h] = (time.perf_counter() - before_time, successes, total)
+            fitness[h] = time.perf_counter() - before_time
+            fitness[h] *= (8 - 7 * successes / total)
+            # fitness[h] = statistics.mean(search_sizes)
 
         # Calculate the similarity between each heuristic and each other heuristic
         population = [(h, all_similarity(h, population[:i] + population[i + 1:]))
@@ -830,12 +914,18 @@ def evolve_main(args):
         # Sort the population by fitness and then by similarity
         population.sort(key=lambda x: (fitness[x[0]], x[1]))
 
+        weight_names = ''.join(f'{r.abbrev:<5}' for r in RULES)
+
         # Print out the population: columns INDIVIDUAL, FITNESS, SIMILARITY
+        print(f'{"order":<69} {weight_names} FIT   SIM  TIME  S T  S/T%')
         for i, (k, sim) in enumerate(population):
-            print(f'{k} {fitness[k]:.3f} {sim:.3f}')
+            print(f'{k} {fitness[k]:.3f} {sim:.3f} {stats[k][0]:.3f} {stats[k][1]} {stats[k][2]} {100 * stats[k][1] / stats[k][2]:.3f}')
             # Anything below the line gets cut off
             if i == args.pop_size - 1:
                 print('-----')
+            # Display at most 40 lines
+            if i >= 40:
+                break
 
         # Cut off the population (MINIMISING fitness function)
         population = [x for (x, s) in population][:args.pop_size]
@@ -894,10 +984,12 @@ def stats_main(args):
     for d in data:
         pass  # print(d[1])
 
-    if args.reverse:
-        heuristic = SimplisticHeuristic(reverse=True)
-    else:
-        heuristic = SimplisticHeuristic()
+    heuristic = WeightedHeuristic([0.68,0.26,0.44,0.23,0.42,0.41,0.63,0.52,0.50,0.53,0.68,0.54,0.26,0.36,0.51,0.50,0.23,0.39,0.52,0.59])
+
+    #if args.reverse:
+    #    heuristic = SimplisticHeuristic(reverse=True)
+    #else:
+    #    heuristic = SimplisticHeuristic()
 
     # don't print out info about each statement if dealing with lots of them
     verbose = len(data) < 40
