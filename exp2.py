@@ -3,7 +3,6 @@
 from abc import ABC, abstractmethod
 import argparse
 import collections
-import math
 import itertools
 import pickle
 import random
@@ -16,7 +15,7 @@ from formula import atomic, bot, impl, conj, disj, forall, exists, proposition
 from formula import variable, equality, zero, succ, predicate_symbol
 from randfol import FormulaGenerator, generate_formulas
 import stats
-from utils import compose, TimeLimit, timelimit_soft, check_timelimit
+from utils import compose, TimeLimit, timelimit_soft, check_timelimit, take, randnat
 
 # If this parameter is False, formulae are removed from premises when they are
 # used. Oddly this doesn't seem to reduce the number of formulae that are
@@ -44,24 +43,12 @@ INDUCTION = 'n'
 P_ONEPOINT = 0.3
 P_MUTATION = 0.2
 
-# Returns a copy of the original list in a random order
-def shuffled(pop):
-    return random.sample(pop, len(pop))
-
-def take(n, iterable):
-    return list(itertools.islice(iterable, n))
-
 # These are the rules of the minimal propositional sequent calculus. This
 # presentation of the rules is a little different from normal because formulae
 # are never removed from 'premises' and premises is treated as a set, so there
 # is no need for the structural rules of Contraction, Weakening,
 # or Permutation.
 
-def random_number_of_terms():
-    x = math.floor(abs(random.normalvariate(0.0, 5.0)))
-    print('x', x)
-    input()
-    return x
 
 def iterate(f, x):
     yield x
@@ -94,7 +81,7 @@ def equality_left_2(premise, premises, goal):
     return ByEqualityLeft2, [(frozenset(p.subst(premise.t2, premise.t1) for p in premises), goal)]
 
 def exists_right(premises, goal):
-    ts = take(random_number_of_terms(), terms(premises, goal))
+    ts = take(randnat(), terms(premises, goal))
     return [(ByExistsRight, [(premises, goal.instantiate(t))]) for t in ts]
 
 def forall_right(premises, goal):
@@ -112,7 +99,7 @@ def exists_left(premise, premises, goal):
         return ByExistsLeft, [((premises - {premise} | {premise.instantiate(fresh(premises, goal))}), goal)]
 
 def forall_left(premise, premises, goal):
-    ts = take(random_number_of_terms(), terms(premises, goal))
+    ts = take(randnat(), terms(premises, goal))
     if KEEP_USED_PREMISES:
         return [(ByForallLeft, [(premises | {premise.instantiate(t)}, goal)]) for t in ts]
     else:
@@ -775,7 +762,7 @@ pP = lambda x: atomic(predicate_symbol('P', 1), (x,))
 
 PEANO_ = set()
 PEANO = {
-    #forall(vX, forall(vY, equality(succ(vX), succ(vY)) > equality(vX, vY))),
+    # forall(vX, forall(vY, equality(succ(vX), succ(vY)) > equality(vX, vY))),
     forall(vX, equality(succ(vX), zero) > bot),
 }
 
@@ -984,12 +971,12 @@ def stats_main(args):
     for d in data:
         pass  # print(d[1])
 
-    heuristic = WeightedHeuristic([0.68,0.26,0.44,0.23,0.42,0.41,0.63,0.52,0.50,0.53,0.68,0.54,0.26,0.36,0.51,0.50,0.23,0.39,0.52,0.59])
+    heuristic = WeightedHeuristic([0.68, 0.26, 0.44, 0.23, 0.42, 0.41, 0.63, 0.52, 0.50, 0.53, 0.68, 0.54, 0.26, 0.36, 0.51, 0.50, 0.23, 0.39, 0.52, 0.59])
 
-    #if args.reverse:
-    #    heuristic = SimplisticHeuristic(reverse=True)
-    #else:
-    #    heuristic = SimplisticHeuristic()
+    # if args.reverse:
+    #     heuristic = SimplisticHeuristic(reverse=True)
+    # else:
+    #     heuristic = SimplisticHeuristic()
 
     # don't print out info about each statement if dealing with lots of them
     verbose = len(data) < 40

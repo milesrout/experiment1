@@ -1,10 +1,25 @@
 import _thread
 import contextlib
 import functools
+import itertools
+import math
 import random
 import signal
 import threading
 import time
+
+
+def randnat(a=5.0):
+    return math.floor(abs(random.normalvariate(0.0, a)))
+
+
+# Returns a copy of the original list in a random order
+def shuffled(pop):
+    return random.sample(pop, len(pop))
+
+
+def take(n, iterable):
+    return list(itertools.islice(iterable, n))
 
 
 class TimeLimit(BaseException):
