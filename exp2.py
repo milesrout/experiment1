@@ -11,6 +11,7 @@ import sys
 import time
 import unicodedata
 
+import lambdal
 from formula import atomic, bot, impl, conj, disj, forall, exists, proposition
 from formula import variable, equality, zero, succ, predicate_symbol
 from randfol import FormulaGenerator, generate_formulas
@@ -63,8 +64,18 @@ def inductive_terms(ground_terms):
     yield from ground_terms
     yield from map(succ, inductive_terms(ground_terms))
 
-for x in list(take(21, inductive_terms([variable('x'), variable('y'), zero]))):
-    print(x)
+#for x in list(take(21, inductive_terms([variable('x'), variable('y'), zero]))):
+#    print(x)
+#
+
+def encode_goal(goal):
+    raise
+
+def encode_premises(premises):
+    raise
+
+def guessterm(tg, premises, goal):
+    return lambdal.guessterm(tg, encode_premises(premises), encode_goal(goal))
 
 def fresh(premises, goal):
     vs = itertools.chain(map(variable, ('a', 'b', 'c')), (variable(f'x{i}') for i in itertools.count(0)))
@@ -80,8 +91,8 @@ def equality_left_1(premise, premises, goal):
 def equality_left_2(premise, premises, goal):
     return ByEqualityLeft2, [(frozenset(p.subst(premise.t2, premise.t1) for p in premises), goal)]
 
-def exists_right(premises, goal):
-    ts = take(randnat(), terms(premises, goal))
+def exists_right(premises, goal, tg):
+    ts = take(randnat(), guessterm(tg, premises, goal))
     return [(ByExistsRight, [(premises, goal.instantiate(t))]) for t in ts]
 
 def forall_right(premises, goal):
@@ -98,8 +109,8 @@ def exists_left(premise, premises, goal):
     else:
         return ByExistsLeft, [((premises - {premise} | {premise.instantiate(fresh(premises, goal))}), goal)]
 
-def forall_left(premise, premises, goal):
-    ts = take(randnat(), terms(premises, goal))
+def forall_left(premise, premises, goal, tg):
+    ts = take(randnat(), guessterm(tg, premises, goal))
     if KEEP_USED_PREMISES:
         return [(ByForallLeft, [(premises | {premise.instantiate(t)}, goal)]) for t in ts]
     else:
@@ -165,13 +176,13 @@ class Heuristic(ABC):
     def weight(self, option):
         ...
 
-    def choose_options(self, sequent):
+    def choose_options(self, sequent, tg):
         (premises, goal) = sequent
 
         # work out all the options
-        options = options_right(premises, goal)
+        options = options_right(premises, goal, tg)
         for premise in sorted(premises, key=str):
-            for option in options_left(premise, premises, goal):
+            for option in options_left(premise, premises, goal, tg):
                 options.append(option)
 
         # choose the order of them - THIS is the key part, the heuristic!
@@ -191,7 +202,7 @@ class SimplisticHeuristic(Heuristic):
             return 1 / (1 + RULES.index(opt[0]))
         return RULES.index(opt[0])
 
-def options_right(premises, goal):
+def options_right(premises, goal, tg):
     """All the possible next steps from the goal"""
     if isinstance(goal, impl):
         return [impl_right(premises, goal)]
@@ -478,9 +489,10 @@ RULES = [
 
 
 class Prover:
-    def __init__(self, restrict_axiom, heuristic):
+    def __init__(self, restrict_axiom, heuristic, termguesser=None):
         self.restrict_axiom = restrict_axiom
         self.heuristic = heuristic
+        self.termguesser = termguesser
         self.trivial_equality = False
         self.inprogress = []
         self.proved = {}
@@ -554,7 +566,7 @@ class Prover:
 
         try:
             self.markinprogress(sequent)
-            options = self.heuristic.choose_options(sequent)
+            options = self.heuristic.choose_options(sequent, self.termguesser)
 
             fail_backtrack = False
             for option in options:
@@ -923,12 +935,13 @@ def evolve_main(args):
 def random_statements(allow_dups, max_depth, connectives, num_stmts=None):
     if num_stmts is None:
         num_stmts = 10000
-    fg = FormulaGenerator(binary_connectives=[impl])
+    if connectives is None:
+        connectives = [impl, conj, disj]
+    fg = FormulaGenerator(binary_connectives=connectives)
     goals = generate_formulas(md=max_depth, n=num_stmts, fg=fg)
     stmts = [(frozenset(), goal) for goal in goals]
     for stmt in stmts:
         print(Proof.fmtsequent(stmt))
-    input()
     return list(stmts)
 
 

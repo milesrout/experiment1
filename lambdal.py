@@ -1,134 +1,242 @@
 from collections import namedtuple, Counter
 import itertools
+import math
 import random
 import utils
-from formula import zero, succ
+from formula import zero, succ, bot, forall, exists, impl, conj, disj, equality, application, variable
+import exp2
 
 POPSIZE = 100
 REDUCTION_STEPS = 200
-TOURNAMENT_SIZE = 20
+TOURNAMENT_SIZE = 5
 TOURNAMENT_PROB = 0.9
+NUMBER_SEQUENTS = 50
 
 def pairs(list):
     return [(list[2 * i], list[2 * i + 1]) for i in range(len(list) // 2)]
 
 def rand_term_guesser(depth):
+    varP = Variable(List(Formula()), 'p')
+    varG = Variable(Formula(), 'g')
     expr = rand_of_type(depth, Term(), {
-        Variable('p'): List(Formula()),
-        Variable('g'): Formula(),
+        varP: varP.type,
+        varG: varG.type,
     })
-    return Lambda(Variable('p'),
-                  Lambda(Variable('g'),
-                         expr))
+    print(string(expr))
+    return Lambda(varP, Lambda(varG, expr))
 
-def calc_fitness(termguesser, premises, goal):
+def encode_term(t, variables=None):
+    if variables is None:
+        variables = []
+    # print('TERM', t, type(t))
+    if isinstance(t, application):
+        if len(t.ts) == 0:
+            return TZero()
+        return TSuc(encode_term(t.ts[0], variables))
+    if isinstance(t, variable):
+        return TVar(encode_nat(variables.index(t.name)))
+        #return TSuc(encode_term(t.ts[0], variables))
+    raise NotImplementedError
+
+def encode_formula(f, variables=None):
+    if variables is None:
+        variables = []
+    # print('FORMULA', f, type(f))
+    if f is bot:
+        return FBottom()
+    if isinstance(f, forall):
+        variables = variables + [f.v.name]
+        return FForall(encode_nat(variables.index(f.v.name)), encode_formula(f.p, variables))
+    if isinstance(f, exists):
+        variables = variables + [f.v.name]
+        return FExists(encode_nat(variables.index(f.v.name)), encode_formula(f.p, variables))
+    if isinstance(f, conj):
+        return FConjunction(encode_formula(f.a, variables),
+                            encode_formula(f.b, variables))
+    if isinstance(f, disj):
+        return FDisjunction(encode_formula(f.a, variables),
+                            encode_formula(f.b, variables))
+    if isinstance(f, impl):
+        return FImplication(encode_formula(f.a, variables),
+                            encode_formula(f.b, variables))
+    if isinstance(f, equality):
+        return FEquality(encode_term(f.t1, variables),
+                         encode_term(f.t2, variables))
+    raise NotImplementedError
+
+def encode_sequent(sequent):
+    premises, goal = sequent
+    return encode_list([encode_formula(p) for p in premises], Formula()), encode_formula(goal)
+
+def calc_fitness(termguesser, sequents):
+    fitnesses = []
+    for sequent in sequents:
+        premises, goal = encode_sequent(sequent)
+        fitnesses.append(do_calc_fitness(termguesser, premises, goal))
+    return sum(fitnesses) / len(fitnesses)
+
+def do_calc_fitness(termguesser, premises, goal):
     tg = Application(Application(termguesser, premises), goal)
-    v = reduce(REDUCTION_STEPS, tg)
+    try:
+        v = reduce(REDUCTION_STEPS, tg)
+    except RanOutOfFuel:
+        return 0
     if not value(v):
         return 0
-    return random.random()
+    if v == TSuc(TZero()):
+        #print('DING', string(termguesser))
+        return 1.0
+    return 0.0
 
 def tournament(population, fitnesses):
     indices = random.sample(range(len(population)), k=TOURNAMENT_SIZE)
-    indices.sort(key=lambda i: fitnesses[i])
+    indices.sort(key=lambda i: 1 - fitnesses[i])
     for i in indices[:-1]:
         if random.random() < TOURNAMENT_PROB:
             return population[i]
     return population[indices[-1]]
 
 def mutate(t):
-    pass
+    return t
 
 def crossover(t1, t2):
     s1 = subexprs(t1)
     s2 = subexprs(t2)
-    print('s1', s1)
-    print('s2', s2)
+    # print('s1')
+    # for x in s1:
+    #     print('\t', x)
+    # print('s2')
+    # for x in s2:
+    #     print('\t', x)
+    s1t = {(x, l): vtype(x) for x, l in s1}
+    s2t = {(x, l): vtype(x) for x, l in s2}
+    # print('s1t')
+    # for x in s1t.items():
+    #     print('\t', x)
+    # print('s2t')
+    # for x in s2t.items():
+    #     print('\t', x)
+    t1s = {}
+    for k, v in s1t.items():
+        t1s[(v, str(v))] = t1s.get((v, str(v)), [])
+        t1s[(v, str(v))].append(k)
+    t2s = {}
+    for k, v in s2t.items():
+        t2s[(v, str(v))] = t2s.get((v, str(v)), [])
+        t2s[(v, str(v))].append(k)
+    # print('t1s')
+    # for ((x, y), z) in t1s.items():
+    #     print('\t', (x, z))
+    # print('t2s')
+    # for ((x, y), z) in t2s.items():
+    #     print('\t', (x, z))
+    # for (typ, strtyp) in t1s.keys() & t2s.keys():
+    #     print('Type:', typ)
+    #     print('Left:')
+    #     for x, l in t1s[(typ, strtyp)]:
+    #         print('\t', string(x), string(l(...)))
+    #     print('Right:')
+    #     for x, l in t2s[(typ, strtyp)]:
+    #         print('\t', string(x), string(l(...)))
+    #     print()
 
-def evolve(premises, goal):
+    shared = list(t1s.keys() & t2s.keys())
+    # print(shared)
+    typ = random.choices(population=shared,
+                         weights=[len(t1s[k]) * len(t2s[k]) for k in shared])[0]
+    xl, ll = random.choice(t1s[typ])
+    xr, lr = random.choice(t2s[typ])
+    # print(typ, string(xl), string(ll(...)), string(xr), string(lr(...)))
+    return [ll(xr), lr(xl)]
+
+def evolve():
+    population = [rand_term_guesser(2) for i in range(POPSIZE)]
     for iteration in itertools.count(0):
-        population = [rand_term_guesser(2) for i in range(POPSIZE)]
-        fitnesses = [calc_fitness(tg, premises, goal) for tg in population]
-        crossover_base = [tournament(population, fitnesses) for i in range(POPSIZE)]
-        indices = pairs(utils.shuffled(range(POPSIZE)))
-        population = [crossover(crossover_base[i], crossover_base[j]) for i, j in indices]
-        print(population)
+        sequents = exp2.random_statements(max_depth=3,
+                                          allow_dups=True,
+                                          num_stmts=NUMBER_SEQUENTS,
+                                          connectives=None)
+        fitnesses = [calc_fitness(tg, sequents) for tg in population]
+        crossover_base = [tournament(population, fitnesses) for i in range(2 * POPSIZE)]
+        indices = pairs(utils.shuffled(range(2 * POPSIZE)))
+        population = [x for i, j in indices for x in crossover(crossover_base[i], crossover_base[j])]
+        # print(population)
         for i in range(POPSIZE):
             population[i] = mutate(population[i])
-        print(population)
-        print(fitnesses)
-        print(crossover_base)
-        print(indices)
+        print('POPULATION:', [string(x) for x in population])
+        print('FITNESSES:', fitnesses)
+        print('CROSSOVERB:', [string(x) for x in crossover_base])
+        print('INDICES:', indices)
 
 def main():
-    sucC = Lambda(Variable('n'), NSuc(Variable('n')))
-    twoC = Lambda(
-        Variable('s'),
-        Lambda(
-            Variable('z'),
-            Application(Variable('s'), Application(Variable('s'), Variable('z')))))
-    plusC = Lambda(
-        Variable('m'),
-        Lambda(
-            Variable('n'),
-            Lambda(
-                Variable('s'),
-                Lambda(
-                    Variable('z'),
-                    Application(
-                        Application(Variable('m'), Variable('s')),
-                        Application(
-                            Application(Variable('n'), Variable('s')),
-                            Variable('z')))))))
-    fourC = Application(Application(plusC, twoC), twoC)
-    length = Fixpoint(Variable('l'), Lambda(Variable('x'),
-                      LCase(Variable('x'),
-                            NZero(),
-                            Variable('y'), Variable('z'), NSuc(Application(Variable('l'), Variable('z'))))))
-    list123 = LCons(NSuc(NZero()), LCons(NSuc(NSuc(NZero())), LCons(NSuc(NSuc(NSuc(NZero()))), LEmpty())))
-    tests = {
-        # Application(length, list123): NSuc(NSuc(NSuc(NZero()))),
-        # Application(Application(fourC, sucC), NZero()): NSuc(NSuc(NSuc(NSuc(NZero())))),
-    }
+    # sucC = Lambda(Variable('n'), NSuc(Variable('n')))
+    # twoC = Lambda(
+    #     Variable('s'),
+    #     Lambda(
+    #         Variable('z'),
+    #         Application(Variable('s'), Application(Variable('s'), Variable('z')))))
+    # plusC = Lambda(
+    #     Variable('m'),
+    #     Lambda(
+    #         Variable('n'),
+    #         Lambda(
+    #             Variable('s'),
+    #             Lambda(
+    #                 Variable('z'),
+    #                 Application(
+    #                     Application(Variable('m'), Variable('s')),
+    #                     Application(
+    #                         Application(Variable('n'), Variable('s')),
+    #                         Variable('z')))))))
+    # fourC = Application(Application(plusC, twoC), twoC)
+    # length = Fixpoint(Variable('l'), Lambda(Variable('x'),
+    #                   LCase(Variable('x'),
+    #                         NZero(),
+    #                         Variable('y'), Variable('z'), NSuc(Application(Variable('l'), Variable('z'))))))
+    # list123 = LCons(NSuc(NZero()), LCons(NSuc(NSuc(NZero())), LCons(NSuc(NSuc(NSuc(NZero()))), LEmpty(Natural()))))
+    # tests = {
+    #     # Application(length, list123): NSuc(NSuc(NSuc(NZero()))),
+    #     # Application(Application(fourC, sucC), NZero()): NSuc(NSuc(NSuc(NSuc(NZero())))),
+    # }
 
-    goal_type = Arrow(List(Formula()), Arrow(Formula(), Arrow(Natural(), Term())))
+    # goal_type = Arrow(List(Formula()), Arrow(Formula(), Arrow(Natural(), Term())))
 
-    for expression, expected in tests.items():
-        actual = reduce(100, expression)
-        if isinstance(actual, expected.__class__) and actual == expected:
-            print(string(expression), '--->', string(expected))
-        else:
-            print(string(expression), '--->', string(actual))
-            print(string(expression), '-/->', string(expected))
-            raise RuntimeError
+    # for expression, expected in tests.items():
+    #     actual = reduce(100, expression)
+    #     if isinstance(actual, expected.__class__) and actual == expected:
+    #         print(string(expression), '--->', string(expected))
+    #     else:
+    #         print(string(expression), '--->', string(actual))
+    #         print(string(expression), '-/->', string(expected))
+    #         raise RuntimeError
 
     counter = Counter()
 
     for i in itertools.count():
         expr = rand_of_type(2, Term(), {
-            Variable('p'): List(Formula()),
-            Variable('g'): Formula()
+            Variable(List(Formula()), 'p'): List(Formula()),
+            Variable(Formula(), 'g'): Formula()
         })
-        premises = LEmpty()
+        premises = LCons(FEquality(TVar(NZero()), TSuc(TVar(NZero()))), LEmpty(Formula()))
         goal = FBottom()
         try:
-            result = reduce(50000, Application(Application(Lambda(Variable('p'), Lambda(Variable('g'), expr)), premises), goal))
+            result = reduce(50000, Application(Application(Lambda(Variable(List(Formula()), 'p'), Lambda(Variable(Formula(), 'g'), expr)), premises), goal))
         except RanOutOfFuel as exc:
             continue
             # print('Problematic term:', string(expr))
             # print('Problematic term:', string(exc.term))
         print(string(expr), end='\n--->\n')
-        print(result)
-        counter[result] += 1
+        print(string(result))
+        counter[string(result)] += 1
         print(counter)
         if i % 1000 == 0 and i != 0:
             print(i)
 
-def fresh(fvs):
-    return next(Variable(i) for i in itertools.count() if Variable(i) not in fvs)
+def fresh(fvs, typ):
+    return next(Variable(typ, str(i)) for i in itertools.count() if Variable(typ, str(i)) not in fvs)
 
-def encode_list(l):
-    result = LEmpty()
+def encode_list(l, typ):
+    result = LEmpty(typ)
     for x in l:
         result = LCons(x, result)
     return result
@@ -169,11 +277,11 @@ def random_application(md, typ, fvs):
     return Application(f, x)
 
 def random_fixpoint(md, typ, fvs):
-    v = fresh(fvs)
+    v = fresh(fvs, typ)
     return Fixpoint(v, rand_of_type(md - 1, typ, {v: typ, **fvs}))
 
 def random_ncase(md, typ, fvs):
-    v = fresh(fvs)
+    v = fresh(fvs, Natural())
     return NCase(rand_of_type(md - 1, Natural(), fvs),
                  rand_of_type(md - 1, typ, fvs),
                  v,
@@ -186,38 +294,43 @@ def random_ifthenelse(md, typ, fvs):
 
 def random_lcase(md, typ, fvs):
     t = random_type()
-    v1 = fresh(fvs)
-    v2 = fresh({v1: t, **fvs})
+    v1 = fresh(fvs, t)
+    v2 = fresh({v1: t, **fvs}, List(t))
     return LCase(rand_of_type(md - 1, List(t), fvs),
                  rand_of_type(md - 1, typ, fvs),
                  v1, v2,
                  rand_of_type(md - 1, typ, {v1: t, v2: List(t), **fvs}))
 
 def random_tcase(md, typ, fvs):
-    v1 = fresh(fvs)
+    v1 = fresh(fvs, Term())
+    v2 = fresh(fvs, Natural())
     return TCase(rand_of_type(md - 1, Term(), fvs),
                  rand_of_type(md - 1, typ, fvs),
                  v1,
                  rand_of_type(md - 1, typ, {v1: Term(), **fvs}),
-                 v1,
-                 rand_of_type(md - 1, typ, {v1: Natural(), **fvs}))
+                 v2,
+                 rand_of_type(md - 1, typ, {v2: Natural(), **fvs}))
 
 def random_fcase(md, typ, fvs):
-    v1 = fresh(fvs)
-    v2 = fresh({v1: None, **fvs})
+    v1 = fresh(fvs, Term())
+    v2 = fresh({v1: Term(), **fvs}, Term())
+    v3 = fresh(fvs, Formula())
+    v4 = fresh({v1: Formula(), **fvs}, Formula())
+    v5 = fresh(fvs, Natural())
+    v6 = fresh({v1: Natural(), **fvs}, Formula())
     return FCase(rand_of_type(md - 1, Formula(), fvs),
                  rand_of_type(md - 1, typ, fvs),
                  v1, v2,
                  rand_of_type(md - 1, typ, {v1: Term(), v2: Term(), **fvs}),
-                 v1, v2,
+                 v3, v4,
                  rand_of_type(md - 1, typ, {v1: Formula(), v2: Formula(), **fvs}),
-                 v1, v2,
+                 v3, v4,
                  rand_of_type(md - 1, typ, {v1: Formula(), v2: Formula(), **fvs}),
-                 v1, v2,
+                 v3, v4,
                  rand_of_type(md - 1, typ, {v1: Formula(), v2: Formula(), **fvs}),
-                 v1, v2,
+                 v5, v6,
                  rand_of_type(md - 1, typ, {v1: Natural(), v2: Formula(), **fvs}),
-                 v1, v2,
+                 v5, v6,
                  rand_of_type(md - 1, typ, {v1: Natural(), v2: Formula(), **fvs}))
 
 def random_specific_base(typ, fvs):
@@ -230,9 +343,9 @@ def random_specific_base(typ, fvs):
     if isinstance(typ, Boolean):
         return random.choice([BTrue(), BFalse()])
     if isinstance(typ, List):
-        return LEmpty()
+        return LEmpty(typ.t)
     if isinstance(typ, Arrow):
-        v = fresh(fvs)
+        v = fresh(fvs, typ.t1)
         x = Lambda(v, rand_of_type(0, typ.t2, {**fvs, v: typ.t1}))
         #print('RSB', fvs, v, typ.t1, typ.t2, string(x))
         return x
@@ -265,9 +378,9 @@ def random_specific(md, typ, fvs):
     if isinstance(typ, Boolean):
         return random.choice([BTrue(), BFalse()])
     if isinstance(typ, List):
-        return encode_list([rand_of_type(md, typ.t) for i in range(utils.randnat())])
+        return encode_list([rand_of_type(md, typ.t) for i in range(utils.randnat())], typ.t)
     if isinstance(typ, Arrow):
-        v = fresh(fvs)
+        v = fresh(fvs, typ.t1)
         x = Lambda(v, rand_of_type(md, typ.t2, {**fvs, v: typ.t1}))
         #print('RS ', fvs, v, typ.t1, typ.t2, string(x))
         return x
@@ -327,14 +440,9 @@ Boolean = namedtuple('Boolean', '')
 List = namedtuple('List', 't')
 Arrow = namedtuple('Arrow', 't1 t2')
 
-# explicitly typed
-
-class Typed(namedtuple('Typed', 'term typ')):
-    pass
-
 # basic lambda calculus
 
-Variable = namedtuple('Variable', 'x')
+Variable = namedtuple('Variable', 'type x')
 Application = namedtuple('Application', 't1 t2')
 Lambda = namedtuple('Lambda', 'x t')
 Fixpoint = namedtuple('Fixpoint', 'x t')
@@ -353,7 +461,7 @@ BIfThenElse = namedtuple('BIfThenElse', 't0 t1 t2')
 
 # with lists
 
-LEmpty = namedtuple('LEmpty', '')
+LEmpty = namedtuple('LEmpty', 'type')
 LCons = namedtuple('LCons', 't1 t2')
 LCase = namedtuple('LCase', 't0 t1 x2 y2 t2')
 
@@ -603,6 +711,8 @@ def do_reduce(term):
     raise NotImplementedError
 
 def string(term):
+    if term is ...:
+        return '_'
     if isinstance(term, Variable):
         return f'{term.x}'
     if isinstance(term, Application):
@@ -662,27 +772,214 @@ def string(term):
     print(term)
     raise NotImplementedError
 
+def removed(dct, key):
+    return {k: v for k, v in dct.items() if k != key}
+
+def dict_union(d1, d2):
+    return {k: v for k, v in itertools.chain(d1.items(), d2.items())}
+
+def vtype(term):
+    d, ty = fvtype(term)
+    # print(d.items())
+    return (tuple(sorted(d.items())), ty)
+
+def fvtype(term):
+    if isinstance(term, Variable):
+        return {term.x: term.type}, term.type
+    if isinstance(term, Application):
+        vs1, t1 = fvtype(term.t1)
+        vs2, t2 = fvtype(term.t2)
+        assert isinstance(t1, Arrow)
+        assert type_equal(t2, t1.t1)
+        return {**vs1, **vs2}, t1.t2
+    if isinstance(term, Lambda):
+        v, typ = fvtype(term.t)
+        return {x: t for x, t in v.items() if x != term.x.x}, Arrow(term.x.type, typ)
+    if isinstance(term, Fixpoint):
+        return fvtype(term.t)
+    if isinstance(term, NZero):
+        return {}, Natural()
+    if isinstance(term, NSuc):
+        return fvtype(term.t)
+    if isinstance(term, NCase):
+        vs0, ty0 = fvtype(term.t0)
+        vs1, ty1 = fvtype(term.t1)
+        vs2, ty2 = fvtype(term.t2)
+        return {**vs0, **vs1, **{k: v for k, v in vs2.items() if k != term.x2.x}}, ty1
+    if isinstance(term, BFalse):
+        return {}, Boolean()
+    if isinstance(term, BTrue):
+        return {}, Boolean()
+    if isinstance(term, BIfThenElse):
+        vs0, ty0 = fvtype(term.t0)
+        if not type_equal(ty0, Boolean()):
+            raise
+        vs1, ty1 = fvtype(term.t1)
+        vs2, ty2 = fvtype(term.t2)
+        return {**vs0, **vs1, **vs2}, ty1
+    if isinstance(term, LEmpty):
+        return {}, List(term.type)
+    if isinstance(term, LCons):
+        vs1, ty1 = fvtype(term.t1)
+        vs2, ty2 = fvtype(term.t2)
+        return {**vs1, **vs2}, ty2
+    if isinstance(term, LCase):
+        vs0, ty0 = fvtype(term.t0)
+        vs1, ty1 = fvtype(term.t1)
+        vs2, ty2 = fvtype(term.t2)
+        return {**vs0, **vs1, **{k: v for k, v in vs2.items() if k != term.x2.x and k != term.y2.x}}, ty1
+    if isinstance(term, TZero):
+        return {}, Term()
+    if isinstance(term, TSuc):
+        return fvtype(term.t)
+    if isinstance(term, TVar):
+        v, t = fvtype(term.t)
+        return v, Term()
+    if isinstance(term, TCase):
+        return fvtype(term.t1)
+        vs0, ty0 = fvtype(term.t0)
+        vs1, ty1 = fvtype(term.t1)
+        vs2, ty2 = fvtype(term.t2)
+        vs3, ty3 = fvtype(term.t3)
+        return {**vs0, **vs1, **{k: v for k, v in vs2.items() if k != term.x2.x}, **{k: v for k, v in vs3.items() if k != term.x3.x}}, ty1
+    if isinstance(term, FBottom):
+        return {}, Formula()
+    if isinstance(term, FEquality):
+        vs1, ty1 = fvtype(term.t1)
+        vs2, ty2 = fvtype(term.t2)
+        return {**vs1, **vs2}, Formula()
+    if isinstance(term, FImplication):
+        vs1, ty1 = fvtype(term.t1)
+        vs2, ty2 = fvtype(term.t2)
+        return {**vs1, **vs2}, Formula()
+    if isinstance(term, FConjunction):
+        vs1, ty1 = fvtype(term.t1)
+        vs2, ty2 = fvtype(term.t2)
+        return {**vs1, **vs2}, Formula()
+    if isinstance(term, FDisjunction):
+        vs1, ty1 = fvtype(term.t1)
+        vs2, ty2 = fvtype(term.t2)
+        return {**vs1, **vs2}, Formula()
+    if isinstance(term, FForall):
+        vs1, ty1 = fvtype(term.t1)
+        vs2, ty2 = fvtype(term.t2)
+        return {**vs1, **vs2}, Formula()
+    if isinstance(term, FExists):
+        vs1, ty1 = fvtype(term.t1)
+        vs2, ty2 = fvtype(term.t2)
+        return {**vs1, **vs2}, Formula()
+    if isinstance(term, FCase):
+        vs0, ty0 = fvtype(term.t0)
+        vs1, ty1 = fvtype(term.t1)
+        vs2, ty2 = fvtype(term.t2)
+        vs3, ty3 = fvtype(term.t3)
+        vs4, ty4 = fvtype(term.t4)
+        vs5, ty5 = fvtype(term.t5)
+        vs6, ty6 = fvtype(term.t6)
+        vs7, ty7 = fvtype(term.t7)
+        vs2 = {k: v for k, v in vs2.items() if k != term.x2.x and k != term.y2.x}
+        vs3 = {k: v for k, v in vs3.items() if k != term.x3.x and k != term.y3.x}
+        vs4 = {k: v for k, v in vs4.items() if k != term.x4.x and k != term.y4.x}
+        vs5 = {k: v for k, v in vs5.items() if k != term.x5.x and k != term.y5.x}
+        vs6 = {k: v for k, v in vs6.items() if k != term.x6.x and k != term.y6.x}
+        vs7 = {k: v for k, v in vs7.items() if k != term.x7.x and k != term.y7.x}
+        return {**vs0, **vs1, **vs2, **vs3, **vs4, **vs5, **vs6, **vs7}, ty1
+    raise NotImplementedError
+
+def ltype(term):
+    if isinstance(term, Variable):
+        return term.type
+    if isinstance(term, Application):
+        return ltype(term.t1).t2
+    if isinstance(term, Lambda):
+        return Arrow(term.x.type, ltype(term.t))
+    if isinstance(term, Fixpoint):
+        return ltype(term.t)
+    if isinstance(term, (NZero, NSuc)):
+        return Natural()
+    if isinstance(term, NCase):
+        return ltype(term.t1)
+    if isinstance(term, BFalse):
+        return Boolean()
+    if isinstance(term, BTrue):
+        return Boolean()
+    if isinstance(term, BIfThenElse):
+        return ltype(term.t1)
+    if isinstance(term, LEmpty):
+        return List(term.type)
+    if isinstance(term, LCons):
+        return ltype(term.t2)
+    if isinstance(term, LCase):
+        return ltype(term.t1)
+    if isinstance(term, TZero):
+        return Term()
+    if isinstance(term, TSuc):
+        return Term()
+    if isinstance(term, TVar):
+        return Term()
+    if isinstance(term, TCase):
+        return ltype(term.t1)
+    if isinstance(term, FBottom):
+        return Formula()
+    if isinstance(term, FEquality):
+        return Formula()
+    if isinstance(term, FImplication):
+        return Formula()
+    if isinstance(term, FConjunction):
+        return Formula()
+    if isinstance(term, FDisjunction):
+        return Formula()
+    if isinstance(term, FForall):
+        return Formula()
+    if isinstance(term, FExists):
+        return Formula()
+    if isinstance(term, FCase):
+        return ltype(term.t1)
+    raise NotImplementedError
+
+def compose(co_x, co_y):
+    return (lambda z: co_x(co_y(z)))
 
 def subexprs(term):
-    return [term] + [y for x in strict_subexprs(term) for y in subexprs(x)]
+    return [(term, lambda x: x)] + [(y, compose(co_x, co_y)) for x, co_x in strict_subexprs(term) for y, co_y in subexprs(x)]
 
 def strict_subexprs(term):
     if isinstance(term, (Variable, NZero, BFalse, BTrue, LEmpty, TZero, FBottom)):
         return []
-    if isinstance(term, (Lambda, Fixpoint, NSuc, TSuc, TVar)):
-        return [term.t]
+    if isinstance(term, (Lambda, Fixpoint)):
+        return [(term.t, lambda x: term.__class__(term.x, x))]
+    if isinstance(term, (NSuc, TSuc, TVar)):
+        return [(term.t, lambda x: term.__class__(x))]
     if isinstance(term, (Application, LCons, FEquality, FImplication, FConjunction, FDisjunction, FForall, FExists)):
-        return [term.t1, term.t2]
+        return [(term.t1, lambda x: term.__class__(x, term.t2)),
+                (term.t2, lambda y: term.__class__(term.t1, y))]
     if isinstance(term, NCase):
-        return [term.t0, term.t1, term.t2]
+        return [(term.t0, lambda x: NCase(x, term.t1, term.x2, term.t2)),
+                (term.t1, lambda y: NCase(term.t0, y, term.x2, term.t2)),
+                (term.t2, lambda z: NCase(term.t0, term.t1, term.x2, z))]
     if isinstance(term, BIfThenElse):
-        return [term.t0, term.t1, term.t2]
+        return [(term.t0, lambda x: BIfThenElse(x, term.t1, term.t2)),
+                (term.t1, lambda y: BIfThenElse(term.t0, y, term.t2)),
+                (term.t2, lambda z: BIfThenElse(term.t0, term.t1, z))]
     if isinstance(term, LCase):
-        return [term.t0, term.t1, term.t2]
+        return [(term.t0, lambda x: LCase(x, term.t1, term.x2, term.y2, term.t2)),
+                (term.t1, lambda y: LCase(term.t0, y, term.x2, term.y2, term.t2)),
+                (term.t2, lambda z: LCase(term.t0, term.t1, term.x2, term.y2, z))]
     if isinstance(term, TCase):
-        return [term.t0, term.t1, term.t2, term.t3]
+        return [(term.t0, lambda x: TCase(x, term.t1, term.x2, term.t2, term.x3, term.t3)),
+                (term.t1, lambda y: TCase(term.t0, y, term.x2, term.t2, term.x3, term.t3)),
+                (term.t2, lambda z: TCase(term.t0, term.t1, term.x2, z, term.x3, term.t3)),
+                (term.t3, lambda w: TCase(term.t0, term.t1, term.x2, term.t2, term.x3, w))]
     if isinstance(term, FCase):
-        return [term.t0, term.t1, term.t2, term.t4, term.t5, term.t6, term.t7]
+        return [(term.t0, lambda x: FCase(x, term.t1, term.x2, term.y2, term.t2, term.x3, term.y3, term.t3, term.x4, term.y4, term.t4, term.x5, term.y5, term.t5, term.x6, term.y6, term.t6, term.x7, term.y7, term.t7)),
+                (term.t1, lambda x: FCase(term.t0, x, term.x2, term.y2, term.t2, term.x3, term.y3, term.t3, term.x4, term.y4, term.t4, term.x5, term.y5, term.t5, term.x6, term.y6, term.t6, term.x7, term.y7, term.t7)),
+                (term.t2, lambda x: FCase(term.t0, term.t1, term.x2, term.y2, x, term.x3, term.y3, term.t3, term.x4, term.y4, term.t4, term.x5, term.y5, term.t5, term.x6, term.y6, term.t6, term.x7, term.y7, term.t7)),
+                (term.t3, lambda x: FCase(term.t0, term.t1, term.x2, term.y2, term.t2, term.x3, term.y3, x, term.x4, term.y4, term.t4, term.x5, term.y5, term.t5, term.x6, term.y6, term.t6, term.x7, term.y7, term.t7)),
+                (term.t4, lambda x: FCase(term.t0, term.t1, term.x2, term.y2, term.t2, term.x3, term.y3, term.t3, term.x4, term.y4, x, term.x5, term.y5, term.t5, term.x6, term.y6, term.t6, term.x7, term.y7, term.t7)),
+                (term.t5, lambda x: FCase(term.t0, term.t1, term.x2, term.y2, term.t2, term.x3, term.y3, term.t3, term.x4, term.y4, term.t4, term.x5, term.y5, x, term.x6, term.y6, term.t6, term.x7, term.y7, term.t7)),
+                (term.t6, lambda x: FCase(term.t0, term.t1, term.x2, term.y2, term.t2, term.x3, term.y3, term.t3, term.x4, term.y4, term.t4, term.x5, term.y5, term.t5, term.x6, term.y6, x, term.x7, term.y7, term.t7)),
+                (term.t7, lambda x: FCase(term.t0, term.t1, term.x2, term.y2, term.t2, term.x3, term.y3, term.t3, term.x4, term.y4, term.t4, term.x5, term.y5, term.t5, term.x6, term.y6, term.t6, term.x7, term.y7, x))]
+    print(term)
     raise NotImplementedError
 
 def example(term):
